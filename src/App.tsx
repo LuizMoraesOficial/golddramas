@@ -226,6 +226,10 @@ export default function App() {
     });
   }, []);
 
+  const handlePlayerStarted = useCallback(() => {
+    if (selectedDrama) rememberDrama(selectedDrama);
+  }, [rememberDrama, selectedDrama]);
+
   const filteredDramas = useMemo(() => {
     if (activeCategory === '__mylist__') return myList;
     if (activeCategory === '__free__') return dramas.filter((drama) => drama.gratis === true);
@@ -305,7 +309,7 @@ export default function App() {
       )}
 
       {player && selectedDrama && (
-        <PlayerModal drama={selectedDrama} initial={player} onClose={() => setPlayer(null)} onStarted={() => rememberDrama(selectedDrama)} />
+        <PlayerModal drama={selectedDrama} initial={player} onClose={() => setPlayer(null)} onStarted={handlePlayerStarted} />
       )}
     </div>
   );
