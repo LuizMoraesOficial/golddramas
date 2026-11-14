@@ -37,9 +37,21 @@ function belongsToCategory(drama: Drama, slug: string) {
   return labels.some((label) => categorySlug(label) === slug);
 }
 
+const MY_LIST_STORAGE_KEY = 'drama-reels-minha-lista';
+
+function readMyList(): Drama[] {
+  try {
+    const stored = window.localStorage.getItem(MY_LIST_STORAGE_KEY);
+    return stored ? JSON.parse(stored) as Drama[] : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function App() {
   const [screen, setScreen] = useState<Screen>('catalog');
   const [dramas, setDramas] = useState<Drama[]>([]);
+  const [myList, setMyList] = useState<Drama[]>(readMyList);
   const [categories, setCategories] = useState<Category[]>([]);
   const [activeCategory, setActiveCategory] = useState('');
   const [selectedDrama, setSelectedDrama] = useState<Drama | null>(null);
@@ -142,26 +154,36 @@ export default function App() {
       searchEffectReadyRef.current = true;
       return;
     }
+    if (activeCategory === '__mylist__') return;
     void loadCatalog(1, true, searchQuery, activeCategory);
-  }, [loadCatalog, searchQuery]);
+  }, [activeCategory, loadCatalog, searchQuery]);
 
   useEffect(() => {
     if (!categoryEffectReadyRef.current) {
       categoryEffectReadyRef.current = true;
       return;
     }
+    if (activeCategory === '__mylist__') {
+      catalogRequestRef.current += 1;
+      setDramas(myList);
+      setPage(1);
+      setHasMore(false);
+      setCatalogError('');
+      setLoading(false);
+      return;
+    }
     void loadCatalog(1, true, searchQuery, activeCategory);
-  }, [activeCategory, loadCatalog, searchQuery]);
+  }, [activeCategory, loadCatalog, myList, searchQuery]);
 
   useEffect(() => {
     const node = sentinelRef.current;
     if (!node || !visitorReady || !hasMore) return;
     const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting && !loading) loadCatalog(page + 1, false, searchQuery);
+      if (entry.isIntersecting && !loading) loadCatalog(page + 1, false, searchQuery, activeCategory);
     }, { rootMargin: '600px' });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [hasMore, loadCatalog, loading, page, searchQuery, visitorReady]);
+  }, [activeCategory, hasMore, loadCatalog, loading, page, searchQuery, visitorReady]);
 
   const openDrama = async (drama: Drama) => {
     window.history.pushState({}, '', `/drama/${drama._id}`);
@@ -192,11 +214,24 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const rememberDrama = useCallback((drama: Drama) => {
+    setMyList((current) => {
+      const next = [drama, ...current.filter((item) => item._id !== drama._id)].slice(0, 100);
+      try {
+        window.localStorage.setItem(MY_LIST_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // O catálogo continua funcionando mesmo se o armazenamento estiver indisponível.
+      }
+      return next;
+    });
+  }, []);
+
   const filteredDramas = useMemo(() => {
+    if (activeCategory === '__mylist__') return myList;
     if (activeCategory === '__free__') return dramas.filter((drama) => drama.gratis === true);
     if (!activeCategory) return dramas;
     return dramas.filter((drama) => belongsToCategory(drama, activeCategory));
-  }, [activeCategory, dramas]);
+  }, [activeCategory, dramas, myList]);
 
   const openEpisode = (episode: FlatEpisode) => {
     setPlayer({ season: episode.seasonNumber, episode: episode.numero });
@@ -240,6 +275,7 @@ export default function App() {
           </div>
 
           <nav className="category-tabs" aria-label="Categorias de doramas">
+            <button className={activeCategory === '__mylist__' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('__mylist__')} aria-selected={activeCategory === '__mylist__'}>Minha lista</button>
             <button className={activeCategory === '' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('')} aria-selected={activeCategory === ''}>Todos</button>
             <button className={activeCategory === '__free__' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('__free__')} aria-selected={activeCategory === '__free__'}>Grátis</button>
             {categories.map((category) => <button className={activeCategory === category.slug ? 'category-tab active' : 'category-tab'} type="button" key={`${category.slug}-${category.nome}`} onClick={() => selectCategory(category.slug)} aria-selected={activeCategory === category.slug}>{category.nome}</button>)}
@@ -249,7 +285,7 @@ export default function App() {
           {loading && filteredDramas.length === 0 ? <CatalogSkeleton /> : (
             filteredDramas.length > 0 ? <section className="catalog-list" aria-label="Lista de doramas">
               {filteredDramas.map((drama, index) => <DramaCard key={`${drama._id}-${index}`} drama={drama} index={index} onOpen={openDrama} />)}
-            </section> : <div className="no-results">Nenhum dorama encontrado para esta categoria.</div>
+            </section> : <div className="no-results">{activeCategory === '__mylist__' ? 'Os doramas que você começar a assistir aparecerão aqui.' : 'Nenhum dorama encontrado para esta categoria.'}</div>
           )}
           <div ref={sentinelRef} className="catalog-sentinel">
             {hasMore ? <>
@@ -269,7 +305,7 @@ export default function App() {
       )}
 
       {player && selectedDrama && (
-        <PlayerModal drama={selectedDrama} initial={player} onClose={() => setPlayer(null)} />
+        <PlayerModal drama={selectedDrama} initial={player} onClose={() => setPlayer(null)} onStarted={() => rememberDrama(selectedDrama)} />
       )}
     </div>
   );
@@ -332,7 +368,7 @@ function DetailView({ drama, loading, error, onBack, onOpenEpisode }: { drama: D
   );
 }
 
-function PlayerModal({ drama, initial, onClose }: { drama: Drama; initial: { season: number; episode: number }; onClose: () => void }) {
+function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; initial: { season: number; episode: number }; onClose: () => void; onStarted: () => void }) {
   const episodes = useMemo(() => flattenEpisodes(drama), [drama]);
   const initialIndex = Math.max(0, episodes.findIndex((episode) => episode.seasonNumber === initial.season && episode.numero === initial.episode));
   const [activeIndex, setActiveIndex] = useState(initialIndex);
@@ -361,11 +397,12 @@ function PlayerModal({ drama, initial, onClose }: { drama: Drama; initial: { sea
       if (!stream.urlVideo) throw new Error('O servidor não retornou um vídeo para este episódio.');
       setSourceUrl(stream.urlVideo);
       setVideoUrl(stream.urlVideo);
+      onStarted();
       if (stream.streamSessionId) setSessionId(stream.streamSessionId);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Não foi possível carregar este episódio.');
     }
-  }, [drama._id, episodes]);
+  }, [drama._id, episodes, onStarted]);
 
   useEffect(() => { void loadEpisode(initialIndex); }, [initialIndex, loadEpisode]);
 
