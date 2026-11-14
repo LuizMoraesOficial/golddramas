@@ -1,0 +1,6 @@
+{
+  "routes": [
+    { "path": "/", "title": "Catálogo — Drama Reels" },
+    { "path": "/drama/:id", "title": "Detalhe do dorama — Drama Reels" }
+  ]
+}
