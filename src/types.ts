@@ -25,6 +25,12 @@ export type Drama = {
   temporadas?: Season[];
 };
 
+export type Category = {
+  nome: string;
+  slug: string;
+  tipo?: string;
+};
+
 export type Season = {
   numero: number;
   titulo: string;

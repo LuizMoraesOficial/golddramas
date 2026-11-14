@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { endStream, ensureVisitor, getDrama, heartbeat, listDramas, listSeedDramas, resetVisitor, startStream } from './api';
-import type { Drama, Episode, Season } from './types';
+import { endStream, ensureVisitor, getDrama, heartbeat, listCategories, listDramas, listSeedDramas, resetVisitor, startStream } from './api';
+import type { Category, Drama, Episode, Season } from './types';
 
 const FALLBACK_COVER = 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?auto=format&fit=crop&w=900&q=80';
 
@@ -28,9 +28,20 @@ function formatDuration(seconds?: number) {
   return `${minutes} min`;
 }
 
+function categorySlug(value: string) {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+function belongsToCategory(drama: Drama, slug: string) {
+  const labels = [...(drama.generos || []), ...(drama.tags || [])];
+  return labels.some((label) => categorySlug(label) === slug);
+}
+
 export default function App() {
   const [screen, setScreen] = useState<Screen>('catalog');
   const [dramas, setDramas] = useState<Drama[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [activeCategory, setActiveCategory] = useState('');
   const [selectedDrama, setSelectedDrama] = useState<Drama | null>(null);
   const [player, setPlayer] = useState<PlayerState>(null);
   const [loading, setLoading] = useState(true);
@@ -45,24 +56,27 @@ export default function App() {
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const bootStartedRef = useRef(false);
   const searchEffectReadyRef = useRef(false);
+  const categoryEffectReadyRef = useRef(false);
+  const catalogRequestRef = useRef(0);
 
-  const loadCatalog = useCallback(async (nextPage: number, replace = false, query = searchQuery) => {
+  const loadCatalog = useCallback(async (nextPage: number, replace = false, query = '', category = '') => {
+    const requestId = ++catalogRequestRef.current;
     setCatalogError('');
     setLoading(true);
     try {
       let result: Awaited<ReturnType<typeof listDramas>>;
       try {
-        result = await listDramas(nextPage, 30, query);
+        result = await listDramas(nextPage, 30, query, '', '', category === '__free__');
       } catch (firstError) {
         if (nextPage !== 1) throw firstError;
         resetVisitor(true);
         await ensureVisitor();
         try {
-          result = await listDramas(nextPage, 30, query);
+          result = await listDramas(nextPage, 30, query, '', '', category === '__free__');
         } catch {
           // Alguns estados antigos do backend rejeitam o filtro `tipo`; tente a rota base.
           try {
-            result = await listDramas(nextPage, 30, query, '');
+            result = await listDramas(nextPage, 30, query, '', '', category === '__free__');
           } catch {
             // O cache é apenas um plano de continuidade para o protótipo temporário.
             if (query) throw new Error('Não foi possível pesquisar agora. Tente novamente.');
@@ -70,10 +84,14 @@ export default function App() {
           }
         }
       }
+      if (requestId !== catalogRequestRef.current) return;
+      const visibleDramas = category && category !== '__free__'
+        ? result.dramas.filter((drama) => belongsToCategory(drama, category))
+        : result.dramas;
       setDramas((current) => {
-        if (replace) return result.dramas;
+        if (replace) return visibleDramas;
         const existing = new Set(current.map((drama) => drama._id));
-        return [...current, ...result.dramas.filter((drama) => !existing.has(drama._id))];
+        return [...current, ...visibleDramas.filter((drama) => !existing.has(drama._id))];
       });
       setPage(nextPage);
       const totalPages = result.pagination?.totalPaginas;
@@ -81,9 +99,9 @@ export default function App() {
     } catch (error) {
       setCatalogError(error instanceof Error ? error.message : 'Erro ao carregar o catálogo.');
     } finally {
-      setLoading(false);
+      if (requestId === catalogRequestRef.current) setLoading(false);
     }
-  }, [searchQuery]);
+  }, []);
 
   useEffect(() => {
     if (bootStartedRef.current) return;
@@ -92,7 +110,13 @@ export default function App() {
       try {
         await ensureVisitor();
         setVisitorReady(true);
-        await loadCatalog(1, true);
+        const catalogPromise = loadCatalog(1, true, '', '');
+        try {
+          setCategories(await listCategories());
+        } catch {
+          setCategories([]);
+        }
+        await catalogPromise;
       } catch (error) {
         try {
           const seed = await listSeedDramas();
@@ -118,8 +142,16 @@ export default function App() {
       searchEffectReadyRef.current = true;
       return;
     }
-    void loadCatalog(1, true, searchQuery);
+    void loadCatalog(1, true, searchQuery, activeCategory);
   }, [loadCatalog, searchQuery]);
+
+  useEffect(() => {
+    if (!categoryEffectReadyRef.current) {
+      categoryEffectReadyRef.current = true;
+      return;
+    }
+    void loadCatalog(1, true, searchQuery, activeCategory);
+  }, [activeCategory, loadCatalog, searchQuery]);
 
   useEffect(() => {
     const node = sentinelRef.current;
@@ -155,6 +187,17 @@ export default function App() {
     setDetailError('');
   };
 
+  const selectCategory = (category: string) => {
+    setActiveCategory(category);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const filteredDramas = useMemo(() => {
+    if (activeCategory === '__free__') return dramas.filter((drama) => drama.gratis === true);
+    if (!activeCategory) return dramas;
+    return dramas.filter((drama) => belongsToCategory(drama, activeCategory));
+  }, [activeCategory, dramas]);
+
   const openEpisode = (episode: FlatEpisode) => {
     setPlayer({ season: episode.seasonNumber, episode: episode.numero });
   };
@@ -187,7 +230,7 @@ export default function App() {
               <h1>Escolha uma história<span>.</span></h1>
               <p className="hero-copy">Mini séries para explorar agora. Abra uma história e deslize pelos episódios como um Reels.</p>
             </div>
-            <div className="hero-stat"><strong>{dramas.length || '—'}</strong><span>títulos carregados</span></div>
+            <div className="hero-stat"><strong>{filteredDramas.length || '—'}</strong><span>títulos carregados</span></div>
           </section>
 
           <div className="catalog-search" role="search">
@@ -196,16 +239,22 @@ export default function App() {
             {searchInput && <button type="button" className="clear-search" onClick={() => setSearchInput('')} aria-label="Limpar pesquisa">×</button>}
           </div>
 
-          {catalogError && <ErrorPanel message={catalogError} onRetry={() => void loadCatalog(1, true)} />}
-          {loading && dramas.length === 0 ? <CatalogSkeleton /> : (
-            dramas.length > 0 ? <section className="catalog-list" aria-label="Lista de doramas">
-              {dramas.map((drama, index) => <DramaCard key={`${drama._id}-${index}`} drama={drama} index={index} onOpen={openDrama} />)}
-            </section> : <div className="no-results">Nenhum dorama encontrado para “{searchQuery}”.</div>
+          <nav className="category-tabs" aria-label="Categorias de doramas">
+            <button className={activeCategory === '' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('')} aria-selected={activeCategory === ''}>Todos</button>
+            <button className={activeCategory === '__free__' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('__free__')} aria-selected={activeCategory === '__free__'}>Grátis</button>
+            {categories.map((category) => <button className={activeCategory === category.slug ? 'category-tab active' : 'category-tab'} type="button" key={`${category.slug}-${category.nome}`} onClick={() => selectCategory(category.slug)} aria-selected={activeCategory === category.slug}>{category.nome}</button>)}
+          </nav>
+
+          {catalogError && <ErrorPanel message={catalogError} onRetry={() => void loadCatalog(1, true, searchQuery, activeCategory)} />}
+          {loading && filteredDramas.length === 0 ? <CatalogSkeleton /> : (
+            filteredDramas.length > 0 ? <section className="catalog-list" aria-label="Lista de doramas">
+              {filteredDramas.map((drama, index) => <DramaCard key={`${drama._id}-${index}`} drama={drama} index={index} onOpen={openDrama} />)}
+            </section> : <div className="no-results">Nenhum dorama encontrado para esta categoria.</div>
           )}
           <div ref={sentinelRef} className="catalog-sentinel">
-            {hasMore && dramas.length > 0 ? <>
+            {hasMore ? <>
               <span>{loading ? 'carregando mais histórias…' : 'deslize para carregar mais histórias'}</span>
-              {!loading && <button className="load-more-button" type="button" onClick={() => void loadCatalog(page + 1, false, searchQuery)}>carregar mais</button>}
+              {!loading && <button className="load-more-button" type="button" onClick={() => void loadCatalog(page + 1, false, searchQuery, activeCategory)}>carregar mais</button>}
             </> : 'fim da seleção'}
           </div>
         </main>

@@ -1,4 +1,4 @@
-import type { Drama, DramaPage, StreamResponse } from './types';
+import type { Category, Drama, DramaPage, StreamResponse } from './types';
 
 const API_ROOT = '/api';
 const TOKEN_KEY = 'drama_reels_token';
@@ -68,11 +68,26 @@ export async function ensureVisitor() {
   });
 }
 
-export async function listDramas(page = 1, limit = 30, busca = '', tipo = '') {
+export async function listCategories() {
+  await ensureVisitor();
+  const response = await request<{ sucesso: boolean; dados: Category[] }>('/app/categorias');
+  const seen = new Set<string>();
+  return response.dados.filter((category) => {
+    if (category.tipo === 'secao') return false;
+    const key = category.nome.trim().toLocaleLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export async function listDramas(page = 1, limit = 30, busca = '', tipo = '', categoria = '', gratis = false) {
   await ensureVisitor();
   const search = busca ? `&busca=${encodeURIComponent(busca)}` : '';
   const filter = tipo ? `&tipo=${encodeURIComponent(tipo)}` : '';
-  const response = await request<DramaPage>(`/app/dramas?pagina=${page}&limite=${limit}${search}${filter}`);
+  const category = categoria ? `&categoria=${encodeURIComponent(categoria)}` : '';
+  const free = gratis ? '&gratis=true' : '';
+  const response = await request<DramaPage>(`/app/dramas?pagina=${page}&limite=${limit}${search}${filter}${category}${free}`);
   return { dramas: response.dados, pagination: response.paginacao };
 }
 
