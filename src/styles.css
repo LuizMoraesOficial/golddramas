@@ -67,3 +67,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; }
 .player-progress input[type="range"]:focus-visible { outline: 2px solid var(--pink-soft); outline-offset: 2px; }
 .player-progress input[type="range"]:disabled { cursor: wait; opacity: .55; }
 .player-time { flex: 0 0 auto; min-width: 68px; color: rgba(255,255,255,.86); font: 600 8px/1 'Sora', sans-serif; letter-spacing: .04em; text-align: right; text-shadow: 0 1px 4px #000; }
+
+/* Seek no rodapé do player; o horário fica sem o fundo herdado do span de progresso. */
+.player-progress { top: auto; bottom: 62px; }
+.player-progress .player-time { display: inline; height: auto; padding: 0; background: transparent; }
