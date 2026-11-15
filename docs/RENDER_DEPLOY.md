@@ -1,16 +1,16 @@
-# Configuração no Render (sem publicar pelo Manus)
+# Deploy no Render (configuração para o titular)
 
-## Variável obrigatória
+## Chave da API
 
-No serviço Web do Render, abra **Environment** e crie:
+No serviço Web do Render, abra **Environment** e defina a variável:
 
 | Nome | Valor |
 |---|---|
-| `APISHORT_API_KEY` | sua chave privada fornecida pelo serviço de catálogo |
+| `APISHORT_API_KEY` | a chave API atual do titular |
 
-Opcionalmente, defina `APISHORT_BASE_URL=https://apishort.com` e `APISHORT_PROVIDER=shortmax`; o código já usa esses valores como padrão. O Render fornece `PORT` automaticamente.
+A chave foi atualizada localmente no ambiente de desenvolvimento. Isso não altera automaticamente a configuração do Render: copie a chave atual para a variável do serviço no painel do Render e não a envie por Git, `.env.example`, `vite.config.ts`, frontend ou uma variável `VITE_*`. O segredo é usado apenas pelo Express no header `X-API-Key`.
 
-Salve as mudanças no Environment do serviço e aguarde o redeploy do Render. Segredos cadastrados ali ficam na configuração do serviço e não devem ser adicionados ao repositório, ao `vite.config.ts`, a variáveis `VITE_*` ou ao frontend.
+Opcional: `APISHORT_BASE_URL` (padrão `https://apishort.com`), `APISHORT_PROVIDER` (ShortMax) e `CATALOG_INDEX_TTL_MINUTES` (padrão 360 min). O Render fornece `PORT` automaticamente.
 
 ## Comandos do serviço
 
@@ -18,10 +18,21 @@ Salve as mudanças no Environment do serviço e aguarde o redeploy do Render. Se
 - **Start Command:** `pnpm start`
 - **Runtime:** Node.js
 
-O servidor Express serve o build estático e lê a chave diretamente de `process.env.APISHORT_API_KEY`. Nenhum arquivo `.env` precisa ser enviado ao Render.
+O servidor Express serve o frontend compilado e as rotas `/api/catalog*` e `/media/hls` no mesmo domínio. Deploy/redeploy é uma ação do titular; nenhum deploy foi executado nesta tarefa.
 
-## Execução local
+## Cota e cache
 
-Copie `.env.example` para `.env` e preencha `APISHORT_API_KEY`. O servidor carrega esse arquivo ao iniciar. O `.gitignore` já exclui `.env`; valide que ele não está sendo rastreado antes do push (`git status --short`). Nunca force a inclusão do arquivo. A chave local e a variável do Render são configurações separadas: preencher uma não configura automaticamente a outra.
+O plano gratuito observado da APIShort tem limite de 100 requisições por dia. A cota pertence à chave/API, portanto chamadas feitas pelo sandbox e pelo Render podem compartilhar o mesmo limite. O backend mantém cache em memória e `.cache/` em disco, mas o filesystem do Render pode ser efêmero e não necessariamente sobrevive ao deploy/reinício. `data/dubbed-seed.json` permite iniciar o catálogo sem chamadas upstream; o primeiro refresh/rebuild e títulos ainda não cacheados podem consumir chamadas. Consulte `GET /api/catalog/meta` para `uso.upstreamCalls`, `cacheHits` e erros. Evite disparar refresh manual.
 
-Esta tarefa prepara o código e as instruções; não conecta ao Render, não executa redeploy nem publica o projeto.
+## Execução local e segredo
+
+Crie `.env` localmente com `APISHORT_API_KEY`, arquivo ignorado pelo Git. O servidor carrega o `.env` na inicialização. Confirme `git status --short` antes de enviar alterações; nunca force a inclusão do `.env`. A chave configurada localmente e a do Render são independentes.
+
+## Smoke test pós-deploy
+
+```bash
+curl -fsS https://SEU-SERVICO.onrender.com/health
+curl -fsS https://SEU-SERVICO.onrender.com/api/catalog/meta
+```
+
+Os comandos acima consultam apenas o serviço do app; para confirmar busca remota, pesquise um termo conhecido na interface e observe o texto de origem. Verifique no log do Render que nenhuma chave aparece. Não faça refresh amplo sem necessidade.

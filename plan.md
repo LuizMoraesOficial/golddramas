@@ -1,22 +1,28 @@
-# Plano — GoldDramas
+# Plano — GoldDramas / Drama Reels
 
-## Escopo
+## Escopo concluído
 
-Atualizar o projeto React/Vite existente, preservando sua identidade, navegação e responsividade. Consumir conteúdo real pela camada Express e usar a chave somente no backend por variável de ambiente. Não publicar a aplicação nesta tarefa.
+Corrigir a descoberta de títulos dublados, a rolagem infinita, a pesquisa em toda a nuvem e a resiliência da integração APIShort / ShortMax. O projeto não foi publicado nem conectado ao Render nesta tarefa.
 
-## Implementação atual
+## Implementação
 
-- **Catálogo:** “Todos” une e deduplica `popular` página 1, `new` páginas 1 e 2 e `category/1` página 1. Itens sem marcador explícito de dublagem em português são descartados. A amostra ao vivo encontrou 68 títulos únicos; o fornecedor repetia IDs e conteúdo entre respostas.
-- **Filtros:** “Novidades”, “Em alta” e “Categoria 1” usam os endpoints conhecidos. Busca continua local nos títulos já carregados; não inventa parâmetros de busca ou IDs de categoria.
-- **Segredo:** `APISHORT_API_KEY` é lida por `process.env`; localmente `apishort.js` carrega `.env` ignorado pelo Git. Não há campo, endpoint de importação ou credencial no frontend. O Render injeta a variável pelo Environment do serviço.
-- **Backend:** Express autentica pelo header `X-API-Key`, usa allowlist e timeout, retorna erros genéricos à interface e mantém cache de dois minutos para respostas de catálogo.
-- **Detalhes e player:** `alleps/{id}` fornece episódios e URLs HLS. Um relay same-origin restrito ao host oficial de mídia reescreve manifestos/segmentos para permitir reprodução. HLS.js é carregado quando necessário.
-- **Preview:** desenvolvimento em Vite na porta 3000, backend API local na 3001 e relay de mídia na 3002. O servidor Express de produção serve o build na porta `PORT`.
+- **Catálogo:** índice combinado, deduplicado por aliases `id` e `code`, com seed versionada. O build validado apresenta 143 títulos dublados únicos, contra cerca de 68 da implementação anterior.
+- **Rolagem:** `/api/catalog?page&limit` pagina o índice; o frontend carrega 24 títulos por lote usando `IntersectionObserver`, refs de concorrência e botão acessível de fallback.
+- **Pesquisa remota:** `q` segue até `search?lang=pt&q=`, independentemente da página aberta; resultados são filtrados para dublagem e complementados com o índice local. A UI informa resultados remotos e locais. Testado com `pulseira`: 4 títulos, 2 da API e 2 do acervo registrado.
+- **Filtros:** abas de ordenação e nove tags reais filtram os itens disponíveis no índice.
+- **Detalhe/player:** `alleps/{id}` produz episódios e HLS; links temporários passam pelo relay restrito a domínios autorizados. Detalhe testado com 63 episódios.
+- **Resiliência:** cache memória + disco, dedupe in-flight e seed favorecem o plano gratuito (100 chamadas/dia). UI apresenta indisponibilidade/cota em vez de alegar que o vídeo não existe.
+- **Segredo:** chave somente no backend; local em `.env` ignorado pelo Git e produção por variável do Render. Nenhum segredo no bundle.
 
-## Variáveis no Render
+## Limites verificados do fornecedor
 
-Obrigatória: `APISHORT_API_KEY`. O `.env` local nunca deve ser enviado ao Git. Comandos sugeridos: Build `pnpm install --frozen-lockfile && pnpm build`; Start `pnpm start`. Consulte [docs/RENDER_DEPLOY.md](docs/RENDER_DEPLOY.md).
+A API não oferece uma listagem completa paginável: apenas `new` tem janelas úteis; `popular`, `hot`, `category/{id}` e `search` ignoram paginação. `hot` repete `popular`; `category/{id}` repete os mesmos itens. Portanto, 143 é a cobertura observada do índice, não promessa de completude absoluta do catálogo ShortMax. Busca remota alcança resultados fora das páginas já carregadas, limitada ao retorno de busca do provedor (até ~26 por termo).
 
-## Limitação de idioma
+## Configuração Render
 
-A API sinaliza `pt`, mas não fornece distinção `pt-BR`/pt-PT nem metadados regionais de áudio. O filtro usa `lang=pt` e marcação `[Dublado]`; a confirmação de variante regional depende do fornecedor.
+- Build: `pnpm install --frozen-lockfile && pnpm build`
+- Start: `pnpm start`
+- Environment obrigatório: `APISHORT_API_KEY` (a chave atual deve ser copiada manualmente pelo titular para o Render; `.env` local não é enviado).
+- Nenhum deploy foi feito nesta tarefa.
+
+Consulte `docs/APISHORT_INTEGRACAO.md`, `docs/API_GUIA.md` e `docs/RENDER_DEPLOY.md` para detalhes.

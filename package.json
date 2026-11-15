@@ -10,7 +10,9 @@
     "start": "node server.js",
     "check": "tsc --noEmit",
     "api:dev": "API_ONLY=1 API_PORT=3001 node server.js",
-    "media:dev": "MEDIA_PORT=3002 node media-server.js"
+    "media:dev": "MEDIA_PORT=3002 node media-server.js",
+    "index:build": "node scripts/build-dubbed-index.mjs",
+    "index:preview": "node scripts/build-dubbed-index.mjs --dry-run"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.1",

@@ -1,16 +1,38 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ensureVisitor, getDrama, listCategories, listDramas } from './api';
+import { ensureVisitor, getCatalogInfo, getDrama, listCategories, listDramas } from './api';
 import type { Category, Drama, Episode, Season } from './types';
 
 const FALLBACK_COVER = 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?auto=format&fit=crop&w=900&q=80';
+const PAGE_LIMIT = 24;
+const SEARCH_DEBOUNCE_MS = 600;
 
 type Screen = 'catalog' | 'detail';
 type PlayerState = { season: number; episode: number } | null;
-
 type FlatEpisode = Episode & { seasonNumber: number; seasonTitle: string };
+
+const TABS = [
+  { id: 'mylist', label: 'Minha lista' },
+  { id: 'todos', label: 'Todos' },
+  { id: 'recentes', label: 'Novidades' },
+  { id: 'vistos', label: 'Em alta' },
+];
+
+function tabRequest(tab: string): { sort: string; tag: string } {
+  if (tab === 'recentes') return { sort: 'recentes', tag: '' };
+  if (tab === 'vistos') return { sort: 'vistos', tag: '' };
+  if (tab === 'todos' || tab === 'mylist' || tab === '') return { sort: 'destaque', tag: '' };
+  return { sort: 'destaque', tag: tab };
+}
 
 function coverFor(drama: Drama) {
   return drama.capaVertical || drama.capaPrincipal || drama.thumbnail || FALLBACK_COVER;
+}
+
+function recoverCover(event: React.SyntheticEvent<HTMLImageElement>) {
+  const node = event.currentTarget;
+  if (node.dataset.fallback === '1') return;
+  node.dataset.fallback = '1';
+  node.src = FALLBACK_COVER;
 }
 
 function flattenEpisodes(drama: Drama | null): FlatEpisode[] {
@@ -24,17 +46,33 @@ function flattenEpisodes(drama: Drama | null): FlatEpisode[] {
 
 function formatDuration(seconds?: number) {
   if (!seconds) return '';
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes} min`;
+  return `${Math.floor(seconds / 60)} min`;
 }
 
-function categorySlug(value: string) {
-  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+function formatTime(seconds?: number) {
+  if (!seconds || !Number.isFinite(seconds)) return '0:00';
+  const whole = Math.floor(seconds);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
 }
 
-function belongsToCategory(drama: Drama, slug: string) {
-  const labels = [...(drama.generos || []), ...(drama.tags || [])];
-  return labels.some((label) => categorySlug(label) === slug);
+function durationFromVideo(video: HTMLVideoElement) {
+  if (Number.isFinite(video.duration) && video.duration > 0) return video.duration;
+  if (video.seekable.length) {
+    const end = video.seekable.end(video.seekable.length - 1);
+    if (Number.isFinite(end) && end > 0) return end;
+  }
+  if (video.buffered.length) {
+    const end = video.buffered.end(video.buffered.length - 1);
+    if (Number.isFinite(end) && end > 0) return end;
+  }
+  return 0;
+}
+
+function compactNumber(value?: number) {
+  if (!value) return '';
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace('.0', '')}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1).replace('.0', '')}K`;
+  return String(value);
 }
 
 const MY_LIST_STORAGE_KEY = 'drama-reels-minha-lista';
@@ -53,47 +91,80 @@ export default function App() {
   const [dramas, setDramas] = useState<Drama[]>([]);
   const [myList, setMyList] = useState<Drama[]>(readMyList);
   const [categories, setCategories] = useState<Category[]>([]);
-  const [activeCategory, setActiveCategory] = useState('');
+  const [activeTab, setActiveTab] = useState('todos');
   const [selectedDrama, setSelectedDrama] = useState<Drama | null>(null);
   const [player, setPlayer] = useState<PlayerState>(null);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [catalogError, setCatalogError] = useState('');
   const [detailError, setDetailError] = useState('');
+  const [noNewTitles, setNoNewTitles] = useState(false);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [visitorReady, setVisitorReady] = useState(false);
   const [searchInput, setSearchInput] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [catalogTotal, setCatalogTotal] = useState(0);
+
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const bootStartedRef = useRef(false);
-  const searchEffectReadyRef = useRef(false);
-  const categoryEffectReadyRef = useRef(false);
-  const catalogRequestRef = useRef(0);
+  const requestRef = useRef(0);
+  const loadingRef = useRef(false);
+  const autoLoadAfterItemsRef = useRef(true);
+  const pageRef = useRef(1);
+  const tabRef = useRef('todos');
+  const queryRef = useRef('');
 
-  const loadCatalog = useCallback(async (nextPage: number, replace = false, query = '', category = '') => {
-    const requestId = ++catalogRequestRef.current;
+  const loadCatalog = useCallback(async (options: { page: number; replace?: boolean; query?: string; tab?: string }) => {
+    const tab = options.tab ?? tabRef.current;
+    const query = options.query ?? queryRef.current;
+    tabRef.current = tab;
+    queryRef.current = query;
+
+    if (tab === 'mylist') {
+      requestRef.current += 1;
+      loadingRef.current = false;
+      autoLoadAfterItemsRef.current = false;
+      setNoNewTitles(false);
+      setDramas(readMyList());
+      setPage(1);
+      pageRef.current = 1;
+      setHasMore(false);
+      setCatalogError('');
+      setLoading(false);
+      return;
+    }
+
+    const requestId = ++requestRef.current;
+    const { sort, tag } = tabRequest(tab);
     setCatalogError('');
+    loadingRef.current = true;
     setLoading(true);
     try {
-      const result = await listDramas(nextPage, 30, query, '', category);
-      if (requestId !== catalogRequestRef.current) return;
-      const remoteCategory = ['__new__', '__hot__', '__category1__'].includes(category);
-      const visibleDramas = category && !remoteCategory
-        ? result.dramas.filter((drama) => belongsToCategory(drama, category))
-        : result.dramas;
+      const result = await listDramas(options.page, PAGE_LIMIT, query, sort, tag);
+      if (requestId !== requestRef.current) return;
+      autoLoadAfterItemsRef.current = result.dramas.length > 0;
+      setNoNewTitles(options.page > 1 && !query && result.dramas.length === 0);
+      setCatalogTotal(result.pagination.total || getCatalogInfo().total);
       setDramas((current) => {
-        if (replace) return visibleDramas;
-        const existing = new Set(current.map((drama) => drama._id));
-        return [...current, ...visibleDramas.filter((drama) => !existing.has(drama._id))];
+        const base = options.replace ? [] : current;
+        const seen = new Set(base.map((drama) => drama._id));
+        return [...base, ...result.dramas.filter((drama) => !seen.has(drama._id))];
       });
-      setPage(nextPage);
-      const totalPages = result.pagination?.totalPaginas;
-      setHasMore(totalPages ? nextPage < totalPages : result.dramas.length >= 30);
+      pageRef.current = options.page;
+      setPage(options.page);
+      setHasMore(result.pagination.mais !== false && options.page < (result.pagination.totalPaginas || 1));
     } catch (error) {
-      setCatalogError(error instanceof Error ? error.message : 'Erro ao carregar o catálogo.');
+      if (requestId !== requestRef.current) return;
+      autoLoadAfterItemsRef.current = false;
+      setNoNewTitles(false);
+      setCatalogError('Não foi possível carregar as histórias agora. Tente novamente em instantes.');
+      if (options.page > 1) setHasMore(false);
     } finally {
-      if (requestId === catalogRequestRef.current) setLoading(false);
+      if (requestId === requestRef.current) {
+        loadingRef.current = false;
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -104,60 +175,43 @@ export default function App() {
       try {
         await ensureVisitor();
         setVisitorReady(true);
-        const catalogPromise = loadCatalog(1, true, '', '');
-        try {
-          setCategories(await listCategories());
-        } catch {
-          setCategories([]);
-        }
-        await catalogPromise;
       } catch (error) {
-        setCatalogError(error instanceof Error ? error.message : 'Não foi possível iniciar a sessão.');
+        setCatalogError('Não foi possível iniciar agora. Tente novamente em instantes.');
         setLoading(false);
       }
+      try {
+        setCategories(await listCategories());
+      } catch {
+        setCategories([]);
+      }
     })();
-  }, [loadCatalog]);
+  }, []);
+
+  // Um único efeito dispara o reload: troca de aba, término da digitação ou
+  // pronta da sessão. Antes havia três efeitos sobrepostos que lançavam a
+  // mesma requisição duas vezes e desperdiçavam a cota diária da API.
+  useEffect(() => {
+    if (!visitorReady) return;
+    void loadCatalog({ page: 1, replace: true, query: searchQuery, tab: activeTab });
+  }, [activeTab, loadCatalog, searchQuery, visitorReady]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setSearchQuery(searchInput.trim()), 350);
+    const timer = window.setTimeout(() => setSearchQuery(searchInput.trim()), SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [searchInput]);
 
   useEffect(() => {
-    if (!searchEffectReadyRef.current) {
-      searchEffectReadyRef.current = true;
-      return;
-    }
-    if (activeCategory === '__mylist__') return;
-    void loadCatalog(1, true, searchQuery, activeCategory);
-  }, [activeCategory, loadCatalog, searchQuery]);
-
-  useEffect(() => {
-    if (!categoryEffectReadyRef.current) {
-      categoryEffectReadyRef.current = true;
-      return;
-    }
-    if (activeCategory === '__mylist__') {
-      catalogRequestRef.current += 1;
-      setDramas(myList);
-      setPage(1);
-      setHasMore(false);
-      setCatalogError('');
-      setLoading(false);
-      return;
-    }
-    void loadCatalog(1, true, searchQuery, activeCategory);
-  }, [activeCategory, loadCatalog, myList, searchQuery]);
-
-  useEffect(() => {
     const node = sentinelRef.current;
-    if (!node || !visitorReady || !hasMore) return;
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting && !loading) loadCatalog(page + 1, false, searchQuery, activeCategory);
-    }, { rootMargin: '600px' });
+    if (!node || !hasMore) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries[0]?.isIntersecting) return;
+      if (loadingRef.current || !visitorReady) return;
+      if (!autoLoadAfterItemsRef.current) return;
+      void loadCatalog({ page: pageRef.current + 1 });
+    }, { rootMargin: '900px 0px' });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [activeCategory, hasMore, loadCatalog, loading, page, searchQuery, visitorReady]);
+  }, [activeTab, hasMore, loadCatalog, visitorReady]);
 
   const openDrama = async (drama: Drama) => {
     window.history.pushState({}, '', `/drama/${drama._id}`);
@@ -166,10 +220,9 @@ export default function App() {
     setDetailLoading(true);
     setSelectedDrama(drama);
     try {
-      const freshDrama = await getDrama(drama._id);
-      setSelectedDrama(freshDrama);
+      setSelectedDrama(await getDrama(drama._id));
     } catch (error) {
-      setDetailError(error instanceof Error ? error.message : 'Não foi possível abrir o dorama.');
+      setDetailError('Não foi possível abrir esta história agora. Tente novamente em instantes.');
     } finally {
       setDetailLoading(false);
     }
@@ -183,8 +236,12 @@ export default function App() {
     setDetailError('');
   };
 
-  const selectCategory = (category: string) => {
-    setActiveCategory(category);
+  const selectTab = (tab: string) => {
+    if (tab === activeTab) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+    setActiveTab(tab);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -204,17 +261,11 @@ export default function App() {
     if (selectedDrama) rememberDrama(selectedDrama);
   }, [rememberDrama, selectedDrama]);
 
-  const filteredDramas = useMemo(() => {
-    if (activeCategory === '__mylist__') return myList;
-    if (['__new__', '__hot__', '__category1__'].includes(activeCategory)) return dramas;
-    if (activeCategory === '__free__') return dramas.filter((drama) => drama.gratis === true);
-    if (!activeCategory) return dramas;
-    return dramas.filter((drama) => belongsToCategory(drama, activeCategory));
-  }, [activeCategory, dramas, myList]);
+  const visibleDramas = activeTab === 'mylist' ? myList : dramas;
+  const loadedCount = visibleDramas.length;
+  const heroTotal = catalogTotal || getCatalogInfo().total || loadedCount;
 
-  const openEpisode = (episode: FlatEpisode) => {
-    setPlayer({ season: episode.seasonNumber, episode: episode.numero });
-  };
+  const openEpisode = (episode: FlatEpisode) => setPlayer({ season: episode.seasonNumber, episode: episode.numero });
 
   const routeDramaId = window.location.pathname.startsWith('/drama/') ? window.location.pathname.split('/')[2] : null;
   useEffect(() => {
@@ -222,7 +273,7 @@ export default function App() {
       const match = dramas.find((drama) => drama._id === routeDramaId);
       if (match) void openDrama(match);
     }
-    // The initial route is read once after the first catalog page is available.
+    // A rota inicial é lida uma vez, quando o catálogo já tem itens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dramas.length, routeDramaId]);
 
@@ -233,7 +284,7 @@ export default function App() {
           <span className="brand-mark">▮</span>
           <span>Drama <b>Reels</b></span>
         </button>
-        <div className="topbar-meta"><span className="live-dot" /> laboratório de streaming</div>
+        <div className="topbar-meta"><span className="live-dot" /> catálogo dublado em português</div>
       </header>
 
       {screen === 'catalog' ? (
@@ -242,37 +293,71 @@ export default function App() {
             <div>
               <p className="eyebrow">DESCUBRA A PRÓXIMA HISTÓRIA</p>
               <h1>Escolha uma história<span>.</span></h1>
-              <p className="hero-copy">Mini séries para explorar agora. Abra uma história e deslize pelos episódios como um Reels.</p>
+              <p className="hero-copy">Histórias dubladas para curtir sem pressa. Escolha uma e prepare a maratona.</p>
             </div>
-            <div className="hero-stat"><strong>{filteredDramas.length || '—'}</strong><span>títulos carregados</span></div>
+            <div className="hero-stat"><strong>{heroTotal || '—'}</strong><span>doramas dublados disponíveis</span></div>
           </section>
 
           <div className="catalog-search" role="search">
             <span className="search-icon" aria-hidden="true">⌕</span>
-            <input value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="Pesquisar nos títulos carregados" aria-label="Pesquisar dorama por título" />
+            <input
+              value={searchInput}
+              onChange={(event) => setSearchInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  void setSearchQuery(searchInput.trim());
+                }
+              }}
+              placeholder="Pesquisar em toda a biblioteca dublada"
+              aria-label="Pesquisar dorama por título"
+            />
             {searchInput && <button type="button" className="clear-search" onClick={() => setSearchInput('')} aria-label="Limpar pesquisa">×</button>}
           </div>
 
-          <nav className="category-tabs" aria-label="Categorias de doramas">
-            <button className={activeCategory === '__mylist__' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('__mylist__')} aria-selected={activeCategory === '__mylist__'}>Minha lista</button>
-            <button className={activeCategory === '' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('')} aria-selected={activeCategory === ''}>Todos</button>
-            <button className={activeCategory === '__new__' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('__new__')} aria-selected={activeCategory === '__new__'}>Novidades</button>
-            <button className={activeCategory === '__hot__' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('__hot__')} aria-selected={activeCategory === '__hot__'}>Em alta</button>
-            <button className={activeCategory === '__category1__' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('__category1__')} aria-selected={activeCategory === '__category1__'}>Categoria 1</button>
-            {categories.map((category) => <button className={activeCategory === category.slug ? 'category-tab active' : 'category-tab'} type="button" key={`${category.slug}-${category.nome}`} onClick={() => selectCategory(category.slug)} aria-selected={activeCategory === category.slug}>{category.nome}</button>)}
+          {searchQuery && (
+            <p className="search-status" aria-live="polite">
+              {loading && searchQuery === searchInput.trim() ? 'buscando em toda a biblioteca…' : `${loadedCount} resultado${loadedCount === 1 ? '' : 's'} para “${searchQuery}”`}
+            </p>
+          )}
+
+          <nav className="category-tabs" aria-label="Ordenações e categorias">
+            {TABS.map((tab) => (
+              <button
+                key={tab.id}
+                className={activeTab === tab.id ? 'category-tab active' : 'category-tab'}
+                type="button"
+                onClick={() => selectTab(tab.id)}
+                aria-selected={activeTab === tab.id}
+              >
+                {tab.label}{tab.id === 'mylist' && myList.length > 0 ? ` (${myList.length})` : ''}
+              </button>
+            ))}
+            {categories.map((category) => (
+              <button
+                className={activeTab === category.slug ? 'category-tab active' : 'category-tab'}
+                type="button"
+                key={`${category.slug}-${category.nome}`}
+                onClick={() => selectTab(category.slug)}
+                aria-selected={activeTab === category.slug}
+              >
+                {category.nome}{category.count ? ` · ${category.count}` : ''}
+              </button>
+            ))}
           </nav>
 
-          {catalogError && <ErrorPanel message={catalogError} onRetry={() => void loadCatalog(1, true, searchQuery, activeCategory)} />}
-          {loading && filteredDramas.length === 0 ? <CatalogSkeleton /> : (
-            filteredDramas.length > 0 ? <section className="catalog-list" aria-label="Lista de doramas">
-              {filteredDramas.map((drama, index) => <DramaCard key={`${drama._id}-${index}`} drama={drama} index={index} onOpen={openDrama} />)}
-            </section> : <div className="no-results">{activeCategory === '__mylist__' ? 'Os doramas que você começar a assistir aparecerão aqui.' : 'Nenhum dorama encontrado para esta categoria.'}</div>
+          {catalogError && <ErrorPanel message={catalogError} onRetry={() => void loadCatalog({ page: activeTab === 'mylist' ? 1 : page, replace: page === 1 })} />}
+          {loading && loadedCount === 0 ? <CatalogSkeleton /> : (
+            loadedCount > 0 ? <section className="catalog-list" aria-label="Lista de doramas">
+              {visibleDramas.map((drama, index) => <DramaCard key={`${drama._id}-${index}`} drama={drama} index={index} onOpen={openDrama} />)}
+            </section> : <div className="no-results">{activeTab === 'mylist' ? 'Os doramas que você começar a assistir aparecerão aqui.' : searchQuery ? `Nenhum dorama dublado encontrado para “${searchQuery}”.` : 'Nenhum dorama encontrado nesta seleção.'}</div>
           )}
           <div ref={sentinelRef} className="catalog-sentinel">
-            {hasMore ? <>
-              <span>{loading ? 'carregando mais histórias…' : 'deslize para carregar mais histórias'}</span>
-              {!loading && <button className="load-more-button" type="button" onClick={() => void loadCatalog(page + 1, false, searchQuery, activeCategory)}>carregar mais</button>}
-            </> : 'fim da seleção'}
+            {loading && loadedCount > 0 ? <span>carregando mais histórias…</span> : hasMore ? <>
+              {noNewTitles && <span aria-live="polite">Ainda não apareceu uma história nova. Você pode carregar mais.</span>}
+              <span>deslize para carregar mais histórias</span>
+              <button className="load-more-button" type="button" onClick={() => void loadCatalog({ page: page + 1 })}>carregar mais</button>
+            </> : loadedCount > 0 ? <span>fim da seleção · {loadedCount} de {heroTotal || loadedCount} títulos</span> : null}
           </div>
         </main>
       ) : (
@@ -293,20 +378,21 @@ export default function App() {
 }
 
 function DramaCard({ drama, index, onOpen }: { drama: Drama; index: number; onOpen: (drama: Drama) => void }) {
-  const tags = drama.generos?.length ? drama.generos : drama.tags?.length ? drama.tags : [drama.tipo === 'shortDrama' ? 'Mini drama' : 'Dorama'];
+  const tags = drama.generos?.length ? drama.generos : drama.tags?.length ? drama.tags : ['Mini drama dublado'];
+  const plays = compactNumber(drama.visualizacoes) || compactNumber(drama.favoritos);
   return (
     <button className="drama-card" onClick={() => onOpen(drama)} style={{ animationDelay: `${Math.min(index * 45, 400)}ms` }}>
       <div className="card-cover-wrap">
-        <img className="card-cover" src={coverFor(drama)} alt={`Capa de ${drama.titulo}`} loading={index < 4 ? 'eager' : 'lazy'} />
+        <img className="card-cover" src={coverFor(drama)} alt={`Capa de ${drama.titulo}`} loading={index < 4 ? 'eager' : 'lazy'} onError={recoverCover} />
         <div className="card-cover-shade" />
-        {drama.novo && <span className="new-badge">NOVO</span>}
+        <span className="dub-badge">DUBLADO PT</span>
         <span className="card-number">{String(index + 1).padStart(2, '0')}</span>
       </div>
       <div className="card-info">
         <div className="chip-row">{tags.slice(0, 2).map((tag) => <span className="chip" key={tag}>{tag}</span>)}</div>
         <h2>{drama.titulo}</h2>
         <p>{drama.sinopse || 'Uma nova história está esperando por você.'}</p>
-        <span className="card-cta">abrir dorama <span>↗</span></span>
+        <span className="card-cta">abrir dorama <span>↗</span>{drama.totalEpisodios ? <em>{drama.totalEpisodios} episódios</em> : null}{plays ? <em>{plays} assistidos</em> : null}</span>
       </div>
       <span className="card-arrow">→</span>
     </button>
@@ -322,26 +408,26 @@ function DetailView({ drama, loading, error, onBack, onOpenEpisode }: { drama: D
     <main className="detail-page">
       <button className="back-button" onClick={onBack}>← catálogo</button>
       <section className="detail-hero">
-        <div className="detail-cover-frame"><img src={coverFor(drama)} alt={`Capa de ${drama.titulo}`} /></div>
+        <div className="detail-cover-frame"><img src={coverFor(drama)} alt={`Capa de ${drama.titulo}`} onError={recoverCover} /></div>
         <div className="detail-copy">
           <p className="eyebrow">SELEÇÃO DRAMA REELS</p>
           <h1>{drama.titulo}</h1>
-          <div className="detail-meta"><span>{drama.totalEpisodios || episodes.length} episódios</span><span>{drama.anoLancamento || '2026'}</span><span>{drama.idiomaTagManual || drama.idioma || 'Dublado'}</span></div>
+          <div className="detail-meta"><span>{drama.totalEpisodios || episodes.length} episódios</span><span>{drama.anoLancamento || '2026'}</span><span>{drama.idiomaTagManual || 'Dublado'}</span></div>
           <p className="detail-synopsis">{drama.sinopse || 'Uma história para assistir no seu ritmo, episódio após episódio.'}</p>
-          <div className="detail-actions"><button className="primary-button" type="button" disabled={!episodes[0]?.urlVideo} onClick={() => episodes[0]?.urlVideo && onOpenEpisode(episodes[0])}>{episodes[0]?.urlVideo ? '▶ assistir agora' : 'vídeo não fornecido'}</button><span className="swipe-hint">{episodes[0]?.urlVideo ? 'HLS oficial · link temporário' : 'sem URL de vídeo para este título'}</span></div>
+          <div className="detail-actions"><button className="primary-button" type="button" disabled={!episodes[0]?.urlVideo} onClick={() => episodes[0]?.urlVideo && onOpenEpisode(episodes[0])}>{episodes[0]?.urlVideo ? '▶ assistir agora' : 'episódio em breve'}</button><span className="swipe-hint">{episodes[0]?.urlVideo ? 'Escolha uma história e aproveite.' : error || 'Novos episódios podem aparecer em breve.'}</span></div>
         </div>
       </section>
 
       {error && <ErrorPanel message={error} onRetry={() => window.location.reload()} />}
       <section className="episodes-section">
         <div className="section-heading"><div><p className="eyebrow">CONTINUE DE ONDE PAROU</p><h2>Todos os episódios</h2></div><span>{episodes.length} disponíveis</span></div>
-        <p className="detail-synopsis">{episodes.some((episode) => episode.urlVideo) ? 'Links de vídeo temporários; o player abre o episódio selecionado.' : 'Não há link de vídeo disponível para estes episódios.'}</p>
+        <p className="detail-synopsis">{episodes.some((episode) => episode.urlVideo) ? 'Escolha um episódio e aproveite a história.' : error || 'Novos episódios podem aparecer em breve.'}</p>
         {drama.temporadas?.map((season: Season) => (
           <div className="season-block" key={season.numero}>
             <div className="season-heading"><span>{String(season.numero).padStart(2, '0')}</span><h3>{season.titulo}</h3></div>
             <div className="episode-grid">{season.episodios.map((episode) => <button className="episode-card" type="button" disabled={!episode.urlVideo} key={`${season.numero}-${episode.numero}`} onClick={() => episode.urlVideo && onOpenEpisode({ ...episode, seasonNumber: season.numero, seasonTitle: season.titulo })}>
-              <span className="episode-thumb">{episode.thumbnail ? <img src={episode.thumbnail} alt="" /> : <span>{String(episode.numero).padStart(2, '0')}</span>}<i>{episode.urlVideo ? '▶' : '—'}</i></span>
-              <span className="episode-text"><strong>Episódio {episode.numero}</strong><small>{formatDuration(episode.duracaoSegundos) || (episode.urlVideo ? 'assistir agora' : 'vídeo indisponível')}</small></span>
+              <span className="episode-thumb">{episode.thumbnail ? <img src={episode.thumbnail} alt="" onError={recoverCover} /> : <span>{String(episode.numero).padStart(2, '0')}</span>}<i>{episode.urlVideo ? '▶' : '—'}</i></span>
+              <span className="episode-text"><strong>Episódio {episode.numero}</strong><small>{formatDuration(episode.duracaoSegundos) || (episode.urlVideo ? 'assistir agora' : 'em breve')}</small></span>
             </button>)}</div>
           </div>
         ))}
@@ -355,6 +441,8 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
   const initialIndex = Math.max(0, episodes.findIndex((episode) => episode.seasonNumber === initial.season && episode.numero === initial.episode));
   const [activeIndex, setActiveIndex] = useState(initialIndex);
   const [videoUrl, setVideoUrl] = useState('');
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
   const [error, setError] = useState('');
   const [muted, setMuted] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -368,6 +456,8 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
     if (!episode) return;
     setActiveIndex(index);
     setVideoUrl('');
+    setCurrentTime(0);
+    setDuration(Number(episode.duracaoSegundos) || 0);
     setError('');
     setPaused(false);
     try {
@@ -375,7 +465,7 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
       setVideoUrl(episode.urlVideo);
       onStarted();
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Não foi possível carregar este episódio.');
+        setError('Não foi possível carregar este episódio. Tente novamente ou escolha outro.');
     }
   }, [episodes, onStarted]);
 
@@ -396,14 +486,18 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
     void import('hls.js').then(({ default: Hls }) => {
       if (cancelled) return;
       if (!Hls.isSupported()) {
-        setError('Este navegador não oferece suporte à reprodução HLS. Tente Safari ou um navegador com Media Source Extensions.');
+        setError('Este aparelho não conseguiu iniciar o episódio. Tente novamente ou escolha outro.');
         return;
       }
       const hls = new Hls({ enableWorker: true });
       destroyHls = () => hls.destroy();
+      hls.on(Hls.Events.LEVEL_LOADED, (_event, data) => {
+        const totalDuration = data.details.totalduration;
+        if (Number.isFinite(totalDuration) && totalDuration > 0) setDuration(totalDuration);
+      });
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) {
-          setError('O stream HLS falhou ao carregar. O link pode ter expirado; tente novamente para recarregar os dados.');
+          setError('Não foi possível iniciar este episódio. Tente novamente ou escolha outro.');
           setPaused(true);
         }
       });
@@ -412,7 +506,7 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
       });
       hls.loadSource(mediaUrl);
       hls.attachMedia(video);
-    }).catch(() => setError('Não foi possível iniciar o decodificador HLS neste navegador.'));
+    }).catch(() => setError('Não foi possível iniciar este episódio. Tente novamente ou escolha outro.'));
     return () => {
       cancelled = true;
       destroyHls?.();
@@ -440,13 +534,27 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
     if (!videoRef.current) return;
     if (videoRef.current.paused) { void videoRef.current.play(); setPaused(false); } else { videoRef.current.pause(); setPaused(true); }
   };
+  const handleSeek = (event: React.FormEvent<HTMLInputElement>) => {
+    event.stopPropagation();
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(duration) || duration <= 0) return;
+    const requestedTime = Number(event.currentTarget.value);
+    if (!Number.isFinite(requestedTime)) return;
+    const mediaDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : duration;
+    const nextTime = Math.max(0, Math.min(mediaDuration, requestedTime));
+    video.currentTime = nextTime;
+    setCurrentTime(nextTime);
+  };
 
   return (
     <div className="player-modal" role="dialog" aria-modal="true" aria-label="Player vertical">
       <div className="player-shell" onTouchStart={(event) => setTouchStart(event.touches[0].clientY)} onTouchEnd={(event) => handleTouchEnd(event.changedTouches[0].clientY)} onWheel={(event) => { if (Math.abs(event.deltaY) > 40) moveEpisode(event.deltaY > 0 ? 1 : -1); }} onClick={() => setControlsVisible((visible) => !visible)}>
         <div className="player-topline"><span className="player-brand">DRAMA <b>REELS</b></span><span>{String(activeIndex + 1).padStart(2, '0')} <i>/</i> {String(episodes.length).padStart(2, '0')}</span></div>
-        <div className="player-progress"><span style={{ width: `${((activeIndex + 1) / Math.max(episodes.length, 1)) * 100}%` }} /></div>
-        {videoUrl ? <video ref={videoRef} key={videoUrl} className="player-video" autoPlay playsInline muted={muted} onPlay={() => setPaused(false)} onPause={() => setPaused(true)} onError={() => setError('O navegador não conseguiu reproduzir este vídeo HLS. Verifique o suporte do navegador ou tente novamente.')} /> : <div className="player-loading"><span className="spinner" /><p>preparando episódio {current?.numero || ''}</p></div>}
+        <div className="player-progress" onClick={(event) => event.stopPropagation()} onTouchStart={(event) => event.stopPropagation()} onTouchEnd={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
+          <input type="range" min={0} max={duration || 0} step={0.25} value={Math.min(currentTime, duration || currentTime)} style={{ '--seek-progress': `${duration ? currentTime / duration * 100 : 0}%` } as React.CSSProperties} disabled={!duration} aria-label="Posição no episódio" aria-valuetext={`${formatTime(currentTime)} de ${formatTime(duration)}`} onInput={handleSeek} onChange={handleSeek} />
+          <span className="player-time">{formatTime(currentTime)} / {formatTime(duration)}</span>
+        </div>
+        {videoUrl ? <video ref={videoRef} key={videoUrl} className="player-video" autoPlay playsInline muted={muted} onLoadedMetadata={(event) => { const next = durationFromVideo(event.currentTarget); if (next > 0) setDuration(next); }} onDurationChange={(event) => { const next = durationFromVideo(event.currentTarget); if (next > 0) setDuration(next); }} onTimeUpdate={(event) => { const video = event.currentTarget; setCurrentTime(video.currentTime || 0); const next = durationFromVideo(video); if (next > 0) setDuration(next); }} onPlay={() => setPaused(false)} onPause={() => setPaused(true)} onError={() => setError('Não foi possível reproduzir este episódio. Tente novamente ou escolha outro.')} /> : <div className="player-loading"><span className="spinner" /><p>preparando episódio {current?.numero || ''}</p></div>}
         <div className="player-vignette" />
         {controlsVisible && <>
           <button className="player-close" onClick={(event) => { event.stopPropagation(); onClose(); }}>× <span>fechar</span></button>

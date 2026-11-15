@@ -1,5 +1,6 @@
 export type Drama = {
   _id: string;
+  code?: string;
   titulo: string;
   slug?: string;
   sinopse?: string;
@@ -7,6 +8,7 @@ export type Drama = {
   pacote?: string;
   idioma?: string;
   idiomaTagManual?: string;
+  dublado?: boolean;
   pais?: string;
   anoLancamento?: number;
   classificacaoIndicativa?: string;
@@ -16,6 +18,8 @@ export type Drama = {
   trailer?: string;
   totalEpisodios?: number;
   totalVisualizacoes?: number;
+  visualizacoes?: number;
+  favoritos?: number;
   avaliacao?: number;
   generos?: string[];
   tags?: string[];
@@ -29,6 +33,7 @@ export type Category = {
   nome: string;
   slug: string;
   tipo?: string;
+  count?: number;
 };
 
 export type Season = {
@@ -54,6 +59,7 @@ export type Pagination = {
   total: number;
   pagina: number;
   totalPaginas: number;
+  mais?: boolean;
 };
 
 export type DramaPage = {

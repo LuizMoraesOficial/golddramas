@@ -1,15 +1,21 @@
-# TODO — GoldDramas
+# TODO — GoldDramas / Drama Reels
 
-- [x] Preservar o app React/Vite e sua interface.
-- [x] Remover a caixa de chave, endpoint de importação e estado em memória; a interface não exibe nome do fornecedor nem segredo.
-- [x] Usar `APISHORT_API_KEY` exclusivamente pelo servidor (`process.env`); `.env` local é ignorado pelo Git e `.env.example` não contém segredo.
-- [x] Substituir a chave local em `.env` pela nova credencial recebida em campo privado; reiniciar o backend e validar `popular` com HTTP 200.
-- [x] Preparar Render: build/start e variáveis documentados. Nenhum deploy foi feito.
-- [x] “Todos” combina e deduplica `popular` p1, `new` p1–p2 e `category/1` p1, mantendo somente títulos marcados como dublados em português. Uma amostra ao vivo anterior encontrou 68 IDs únicos; a primeira lista popular tinha 28 itens marcados (25 IDs únicos).
-- [x] “Novidades” inclui as duas páginas com itens novos na amostra. Não inventar índices de categorias não documentados.
-- [x] Manter detalhe e player HLS com relay limitado ao domínio de mídia autorizado.
-- [x] TypeScript, build, teste sintético de deduplicação e verificação de `.env` sem chave real aprovados.
-- [x] Validar a união ao vivo com a nova chave: “Todos” mostra 68 IDs únicos e “Novidades” 45; o Preview não mostra formulário nem nome do fornecedor.
-- [ ] O usuário precisa cadastrar `APISHORT_API_KEY` no Environment do serviço Render para o deploy remoto; Git não transfere segredos.
-- [ ] Confirmar com fornecedor se `[Dublado]` significa PT-BR especificamente; a API só identificou `pt`.
-- [ ] Confirmar índice de categorias, busca remota e paginação com o fornecedor.
+## Concluído
+
+- [x] Preservar a aplicação React/Vite e manter a chave API exclusivamente no backend.
+- [x] Ampliar o índice dublado de 68 para 143 títulos únicos usando janelas disponíveis, fontes de catálogo e seed versionada.
+- [x] Implementar rolagem infinita, paginação real do índice e deduplicação estável.
+- [x] Implementar busca remota independente da página aberta, filtro dublado PT e complemento do acervo local. Busca de `pulseira` validada com 4 resultados (2 API + 2 acervo).
+- [x] Validar tags reais (ex.: Casa Nobre retorna 17 títulos), detalhe e player: título de teste carregou 63 episódios HLS.
+- [x] Testar atualização da chave local recebida em privado: nova chave autenticou; detalhe antes bloqueado carregou 50 episódios. O teste consumiu 2 chamadas upstream após o reinício.
+- [x] Corrigir o texto de detalhe para distinguir cota/API indisponível de um vídeo que realmente não foi fornecido.
+- [x] Adicionar cache em memória/disco, seed de cold-start, telemetria de chamadas e dedupe de requisições simultâneas.
+- [x] Atualizar este plano, o guia de API e as instruções de Render; conferir o segredo fora do controle de versão.
+- [x] TypeScript e build de produção devem passar no teste final.
+
+## Pendências do titular
+
+- [ ] Atualizar `APISHORT_API_KEY` no **Environment** do serviço no Render com a chave atual. A variável local e a variável do Render são independentes; não coloque a chave em arquivo ou variável `VITE_*`.
+- [ ] Fazer o deploy/redeploy no Render quando desejar. Nenhum deploy foi executado pelo Manus.
+- [ ] O fornecedor não identifica a diferença entre PT-BR e PT-PT; a marcação disponível é apenas `pt`/`[Dublado]`.
+- [ ] Cobertura do índice não é completa por limitação do fornecedor: várias rotas ignoram paginação e não há uma listagem global. A busca API retorna até aproximadamente 26 correspondências por termo.

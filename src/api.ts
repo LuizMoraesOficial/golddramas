@@ -1,7 +1,6 @@
-import type { Category, Drama, Episode } from './types';
+import type { Category, Drama, Episode, Pagination } from './types';
 
 const API_ROOT = '/api';
-const PORTUGUESE_DUB_MARKER = /^\s*\[(?:dublado|dublada|dublado em português|dublada em português)\]\s*/i;
 type UnknownRecord = Record<string, unknown>;
 
 function asRecord(value: unknown): UnknownRecord {
@@ -15,83 +14,6 @@ function firstString(source: UnknownRecord, keys: string[]) {
     if (typeof value === 'number') return String(value);
   }
   return '';
-}
-
-function unwrap(value: unknown): unknown {
-  let current = value;
-  for (let depth = 0; depth < 3; depth += 1) {
-    const object = asRecord(current);
-    const next = object.data ?? object.result ?? object.response;
-    if (next === undefined) break;
-    current = next;
-  }
-  return current;
-}
-
-function arrayFrom(value: unknown, keys: string[]): unknown[] {
-  const unwrapped = unwrap(value);
-  if (Array.isArray(unwrapped)) return unwrapped;
-  const record = asRecord(unwrapped);
-  for (const key of keys) {
-    if (Array.isArray(record[key])) return record[key] as unknown[];
-  }
-  return [];
-}
-
-function hasPortugueseDubMarker(value: unknown) {
-  const item = asRecord(value);
-  const title = firstString(item, ['name', 'title', 'drama_name', 'book_name']);
-  if (PORTUGUESE_DUB_MARKER.test(title)) return true;
-  const explicitLanguage = firstString(item, ['audio_language', 'audioLanguage', 'dub_language', 'dubLanguage', 'audio_lang']).toLowerCase();
-  const explicitDub = item.dubbed === true || item.is_dubbed === true || item.isDubbed === true;
-  return explicitDub && /^(pt|pt-br|portuguese|português)(\b|[-_])/i.test(explicitLanguage);
-}
-
-function normalizeEpisode(value: unknown, index: number): Episode {
-  const item = asRecord(value);
-  const video = asRecord(item.video);
-  const urlVideo = firstString(item, ['video_url', 'videoUrl', 'url', 'play_url', 'playUrl'])
-    || firstString(video, ['video_720', 'video_480', 'video_1080']);
-  return {
-    _id: firstString(item, ['id', 'episode_id', 'episodeId', 'vid']),
-    numero: Number(item.number ?? item.episode ?? item.episode_number ?? item.index ?? index + 1) || index + 1,
-    titulo: firstString(item, ['title', 'name', 'episode_title']) || `Episódio ${index + 1}`,
-    descricao: firstString(item, ['description', 'desc']),
-    thumbnail: firstString(item, ['thumbnail', 'cover', 'image', 'thumb']),
-    duracaoSegundos: Number(item.duration ?? item.duration_seconds ?? 0) || undefined,
-    urlVideo,
-    urlVideoExpiraEm: Number(item.expires ?? item.video_expires ?? 0) || undefined,
-  };
-}
-
-function normalizeDrama(value: unknown, index: number): Drama {
-  const item = asRecord(value);
-  const rawEpisodes = arrayFrom(item, ['episodes', 'episode_list', 'episodeList', 'videos']);
-  const categoryValue = item.categories ?? item.category ?? item.tags ?? item.genres;
-  const labels = Array.isArray(categoryValue)
-    ? categoryValue.map((entry) => typeof entry === 'string' ? entry : firstString(asRecord(entry), ['name', 'title', 'labelName'])).filter(Boolean)
-    : typeof categoryValue === 'string' ? [categoryValue] : [];
-  const sourceTitle = firstString(item, ['title', 'name', 'drama_name', 'book_name']) || 'Título não informado';
-  return {
-    _id: firstString(item, ['id', 'drama_id', 'dramaId', 'book_id', 'bookId', 'short_play_id', 'code']) || `shortmax-${index}`,
-    titulo: sourceTitle.replace(PORTUGUESE_DUB_MARKER, ''),
-    slug: firstString(item, ['slug']),
-    sinopse: firstString(item, ['description', 'desc', 'synopsis', 'intro', 'summary']),
-    tipo: 'shortDrama',
-    idioma: 'pt',
-    idiomaTagManual: 'Dublado em português',
-    anoLancamento: Number(item.year ?? item.release_year) || undefined,
-    capaPrincipal: firstString(item, ['cover', 'cover_url', 'poster', 'image', 'vertical_cover']),
-    capaVertical: firstString(item, ['vertical_cover', 'cover', 'cover_url', 'poster', 'image']),
-    thumbnail: firstString(item, ['thumbnail', 'thumb']),
-    trailer: firstString(item, ['trailer']),
-    totalEpisodios: Number(item.episode_count ?? item.total_episodes ?? item.totalEpisodes ?? (typeof item.episodes === 'number' ? item.episodes : rawEpisodes.length)) || undefined,
-    generos: labels,
-    tags: labels,
-    novo: Boolean(item.is_new ?? item.new),
-    destaque: Boolean(item.featured ?? item.is_hot),
-    temporadas: rawEpisodes.length ? [{ numero: 1, titulo: 'Episódios', episodios: rawEpisodes.map(normalizeEpisode) }] : [],
-  };
 }
 
 async function request<T>(path: string): Promise<T> {
@@ -108,70 +30,172 @@ async function request<T>(path: string): Promise<T> {
 export async function ensureVisitor() { /* A autenticação é feita exclusivamente pelo servidor. */ }
 export function resetVisitor(_rotateDevice = false) { /* Não há credenciais armazenadas no navegador. */ }
 
-export async function listCategories(): Promise<Category[]> {
-  // A documentação ShortMax lista category/{id}, mas não publica um índice completo de categorias.
+type CatalogResponse = {
+  dramas?: unknown[];
+  pagination?: { total?: number; pagina?: number; totalPaginas?: number; mais?: boolean };
+  catalog?: unknown;
+  busca?: { termo?: string; origem?: string; total?: number; remotos?: number; locais?: number } | null;
+  error?: string;
+};
+
+const clientCache = new Map<string, Promise<CatalogResponse>>();
+
+function fetchCatalog(params: URLSearchParams): Promise<CatalogResponse> {
+  const key = params.toString();
+  let pending = clientCache.get(key);
+  if (!pending) {
+    pending = request<CatalogResponse>(`/catalog?${params}`).catch((error) => {
+      clientCache.delete(key);
+      throw error;
+    });
+    clientCache.set(key, pending);
+  }
+  return pending;
+}
+
+function normalizeEpisode(value: unknown, index: number): Episode {
+  const item = asRecord(value);
+  const video = asRecord(item.video);
+  const urlVideo = firstString(video, ['video_720', 'video_480', 'video_1080'])
+    || firstString(item, ['video_url', 'videoUrl', 'url', 'play_url', 'playUrl']);
+  return {
+    _id: firstString(item, ['id', 'episode_id', 'vid']),
+    numero: Number(item.episode ?? item.number ?? item.episode_number ?? item.index ?? index + 1) || index + 1,
+    titulo: firstString(item, ['title', 'name', 'episode_title']) || `Episódio ${index + 1}`,
+    descricao: firstString(item, ['description', 'desc']),
+    thumbnail: firstString(item, ['thumbnail', 'cover', 'image']),
+    duracaoSegundos: Number(item.duration ?? item.duracaoSegundos ?? item.duration_seconds ?? 0) || undefined,
+    urlVideo,
+    urlVideoExpiraEm: Number(item.expires ?? item.video_expires ?? 0) || undefined,
+  };
+}
+
+function labelsOf(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((entry) => typeof entry === 'string' ? entry : firstString(asRecord(entry), ['name', 'title', 'label'])).filter(Boolean);
+  if (typeof value === 'string' && value.trim()) return [value.trim()];
   return [];
 }
 
-const catalogCache = new Map<string, Promise<unknown>>();
+function normalizeDrama(value: unknown): Drama {
+  const item = asRecord(value);
+  const labels = labelsOf(item.generos ?? item.tags ?? item.categories);
+  const capa = firstString(item, ['capaPrincipal', 'capa', 'cover']);
+  return {
+    _id: firstString(item, ['_id', 'id', 'drama_id', 'code']),
+    code: firstString(item, ['code']) || undefined,
+    titulo: firstString(item, ['titulo', 'title', 'name', 'drama_name']) || 'Título não informado',
+    slug: firstString(item, ['slug']) || undefined,
+    sinopse: firstString(item, ['sinopse', 'summary', 'description', 'intro']) || undefined,
+    tipo: firstString(item, ['tipo']) || 'shortDrama',
+    idioma: 'pt',
+    idiomaTagManual: 'Dublado em português',
+    dublado: item.dublado !== false,
+    capaPrincipal: capa || undefined,
+    capaVertical: firstString(item, ['capaVertical']) || capa || undefined,
+    thumbnail: firstString(item, ['thumbnail']) || capa || undefined,
+    totalEpisodios: Number(item.totalEpisodios ?? item.episodios ?? 0) || undefined,
+    generos: labels,
+    tags: labels,
+    visualizacoes: Number(item.visualizacoes ?? 0) || undefined,
+    favoritos: Number(item.favoritos ?? 0) || undefined,
+    destaque: Boolean(item.destaque),
+    novo: Boolean(item.novo),
+    temporadas: [],
+  };
+}
 
-async function loadCatalogSource(route: string, page: number) {
-  const key = `${route}:${page}`;
-  let pending = catalogCache.get(key);
-  if (!pending) {
-    pending = request<unknown>(`/${route}?lang=pt&page=${page}`);
-    catalogCache.set(key, pending);
+export type CatalogInfo = {
+  total: number;
+  tags: Category[];
+  avisos: string[];
+  atualizadoEm?: string;
+};
+
+export type SearchInfo = {
+  termo: string;
+  origem: string;
+  remotos: number;
+  locais: number;
+};
+
+let lastCatalogInfo: CatalogInfo = { total: 0, tags: [], avisos: [] };
+
+export function getCatalogInfo() {
+  return lastCatalogInfo;
+}
+
+function rememberCatalog(source: unknown) {
+  const catalog = asRecord(source ?? {});
+  const info: CatalogInfo = {
+    total: Number(catalog.total ?? 0) || lastCatalogInfo.total,
+    tags: Array.isArray(catalog.tags)
+      ? catalog.tags.map((tag) => ({ nome: firstString(asRecord(tag), ['nome', 'name']), slug: firstString(asRecord(tag), ['slug']), count: Number(asRecord(tag).count ?? 0) || undefined }))
+      : lastCatalogInfo.tags,
+    avisos: Array.isArray(catalog.avisos) ? catalog.avisos.map(String) : [],
+    atualizadoEm: firstString(catalog, ['construidoEm']) || undefined,
+  };
+  if (info.tags.some((tag) => !tag.nome || !tag.slug)) {
+    info.tags = info.tags.filter((tag) => tag.nome && tag.slug);
   }
+  lastCatalogInfo = info;
+}
+
+export async function listCategories(): Promise<Category[]> {
   try {
-    return await pending;
-  } catch (error) {
-    catalogCache.delete(key);
-    throw error;
+    rememberCatalog(await request<UnknownRecord>('/catalog/meta'));
+    return lastCatalogInfo.tags;
+  } catch {
+    return lastCatalogInfo.tags;
   }
 }
 
-export async function listDramas(page = 1, _limit = 30, search = '', _tipo = '', category = '', _free = false) {
-  const sources: Array<[string, number]> = category === '__new__'
-    ? [['new', 1], ['new', 2]]
-    : category === '__hot__'
-      ? [['hot', 1]]
-      : category === '__category1__'
-        ? [['category/1', 1]]
-        : [['popular', 1], ['new', 1], ['new', 2], ['category/1', 1]];
-  const payloads: unknown[] = [];
-  for (const [route, sourcePage] of sources) {
-    payloads.push(await loadCatalogSource(route, sourcePage));
-  }
-  const rows = payloads.flatMap((payload) => arrayFrom(payload, ['dramas', 'list', 'items', 'books', 'data']));
-  const seenIds = new Set<string>();
-  const normalizedSearch = search.trim().toLocaleLowerCase();
-  const dramas = rows
-    .filter(hasPortugueseDubMarker)
-    .filter((value) => {
-      const item = asRecord(value);
-      const id = firstString(item, ['id', 'drama_id', 'dramaId', 'book_id', 'bookId', 'code']) || firstString(item, ['name', 'title']);
-      if (seenIds.has(id)) return false;
-      seenIds.add(id);
-      return true;
-    })
-    .map(normalizeDrama)
-    .filter((drama) => !normalizedSearch || drama.titulo.toLocaleLowerCase().includes(normalizedSearch));
-  return { dramas, pagination: { total: dramas.length, pagina: page, totalPaginas: 1 } };
+export async function listDramas(page = 1, limit = 30, search = '', sort = 'destaque', tag = '') {
+  const params = new URLSearchParams({ page: String(page), limit: String(limit), sort });
+  if (search.trim()) params.set('q', search.trim());
+  if (tag) params.set('tag', tag);
+  const payload = await fetchCatalog(params);
+  rememberCatalog(payload.catalog);
+  const pagination: Pagination = {
+    total: Number(payload.pagination?.total ?? 0) || 0,
+    pagina: Number(payload.pagination?.pagina ?? page) || page,
+    totalPaginas: Number(payload.pagination?.totalPaginas ?? 1) || 1,
+    mais: Boolean(payload.pagination?.mais),
+  };
+  const busca: SearchInfo | null = payload.busca
+    ? {
+      termo: payload.busca.termo ?? search,
+      origem: payload.busca.origem ?? 'local',
+      remotos: Number(payload.busca.remotos ?? 0) || 0,
+      locais: Number(payload.busca.locais ?? 0) || 0,
+    }
+    : null;
+  return {
+    dramas: (payload.dramas ?? []).map(normalizeDrama).filter((drama) => drama._id),
+    pagination,
+    busca,
+    aviso: payload.error,
+  };
 }
+
+type DetailResponse = { drama?: unknown; episodes?: unknown[]; error?: string };
 
 export async function getDrama(id: string): Promise<Drama> {
-  // ShortMax retorna metadados, episódios e URLs HLS assinadas juntos em alleps/{id}.
-  const payload = await request<unknown>(`/alleps/${encodeURIComponent(id)}?lang=pt`);
-  const detail = unwrap(payload);
-  if (!hasPortugueseDubMarker(detail)) {
-    throw new Error('Este título não está identificado como dublado em português pelo catálogo.');
+  let payload: DetailResponse;
+  try {
+    payload = await request<DetailResponse>(`/catalog/detail/${encodeURIComponent(id)}`);
+  } catch (error) {
+    throw new Error(error instanceof Error && error.message ? error.message : 'Não foi possível abrir este dorama.');
   }
-  const drama = normalizeDrama(detail, 0);
-  const episodes = arrayFrom(payload, ['episodes', 'episode_list', 'episodeList', 'videos', 'list', 'items']).map(normalizeEpisode);
+  if (!payload.drama) throw new Error(payload.error || 'Este título não está disponível no momento.');
+  const base = normalizeDrama(payload.drama);
+  const episodes = (payload.episodes ?? []).map(normalizeEpisode);
+  if (!episodes.some((episode) => episode.urlVideo)) {
+    throw new Error(payload.error || 'Este título ainda não tem episódios disponíveis para reprodução.');
+  }
   return {
-    ...drama,
+    ...base,
     _id: id,
+    totalEpisodios: episodes.length || base.totalEpisodios,
     temporadas: episodes.length ? [{ numero: 1, titulo: 'Episódios', episodios: episodes }] : [],
-    totalEpisodios: episodes.length || drama.totalEpisodios,
   };
 }

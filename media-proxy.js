@@ -76,7 +76,13 @@ export async function hlsMediaHandler(req, res) {
       const value = upstream.headers.get(header);
       if (value) res.set(header, value);
     }
-    Readable.fromWeb(upstream.body).pipe(res);
+    const body = Readable.fromWeb(upstream.body);
+    body.on('error', () => {
+      if (res.destroyed || res.writableEnded) return;
+      if (!res.headersSent) res.status(502).json({ error: 'Não foi possível carregar este episódio.' });
+      else res.end();
+    });
+    body.pipe(res);
   } catch (error) {
     if (error?.name === 'AbortError') {
       if (!res.headersSent) res.status(504);
