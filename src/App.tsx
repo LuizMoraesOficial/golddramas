@@ -9,6 +9,18 @@ const SEARCH_DEBOUNCE_MS = 600;
 type Screen = 'catalog' | 'detail';
 type PlayerState = { season: number; episode: number } | null;
 type FlatEpisode = Episode & { seasonNumber: number; seasonTitle: string };
+type InstallPlatform = 'ios' | 'android' | 'other';
+
+interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
+}
+
+type WebkitVideoElement = HTMLVideoElement & {
+  webkitSupportsPresentationMode?: (mode: 'inline' | 'picture-in-picture' | 'fullscreen') => boolean;
+  webkitSetPresentationMode?: (mode: 'inline' | 'picture-in-picture' | 'fullscreen') => void;
+  webkitPresentationMode?: 'inline' | 'picture-in-picture' | 'fullscreen';
+};
 
 const TABS = [
   { id: 'mylist', label: 'Minha lista' },
@@ -26,6 +38,29 @@ function tabRequest(tab: string): { sort: string; tag: string } {
 
 function coverFor(drama: Drama) {
   return drama.capaVertical || drama.capaPrincipal || drama.thumbnail || FALLBACK_COVER;
+}
+
+function detectInstallPlatform(): InstallPlatform {
+  const userAgent = navigator.userAgent || '';
+  const isIPadOS = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+  if (/iPhone|iPad|iPod/i.test(userAgent) || isIPadOS) return 'ios';
+  if (/Android/i.test(userAgent)) return 'android';
+  return 'other';
+}
+
+function isAppInstalled() {
+  const navigatorWithStandalone = navigator as Navigator & { standalone?: boolean };
+  return window.matchMedia?.('(display-mode: standalone)').matches === true || navigatorWithStandalone.standalone === true;
+}
+
+function pictureInPictureHelp() {
+  if (detectInstallPlatform() === 'ios' && isAppInstalled()) {
+    return 'No iPhone, o modo flutuante pode não funcionar quando o app é aberto pela Tela de Início. Tente abrir o dorama pelo Safari.';
+  }
+  if (detectInstallPlatform() === 'ios') {
+    return 'No iPhone, a disponibilidade da janela flutuante depende do navegador e do vídeo. Se você abriu por outro navegador, tente pelo Safari.';
+  }
+  return 'Este navegador ou aparelho não oferece janela flutuante para este vídeo. O episódio continua aberto neste player.';
 }
 
 function recoverCover(event: React.SyntheticEvent<HTMLImageElement>) {
@@ -105,6 +140,10 @@ export default function App() {
   const [searchInput, setSearchInput] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [catalogTotal, setCatalogTotal] = useState(0);
+  const [installPlatform, setInstallPlatform] = useState<InstallPlatform>('other');
+  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [appInstalled, setAppInstalled] = useState(false);
+  const [installHelpOpen, setInstallHelpOpen] = useState(false);
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const bootStartedRef = useRef(false);
@@ -114,6 +153,41 @@ export default function App() {
   const pageRef = useRef(1);
   const tabRef = useRef('todos');
   const queryRef = useRef('');
+
+  useEffect(() => {
+    setInstallPlatform(detectInstallPlatform());
+    setAppInstalled(isAppInstalled());
+    const beforeInstallHandler = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as BeforeInstallPromptEvent);
+    };
+    const installedHandler = () => {
+      setAppInstalled(true);
+      setInstallPrompt(null);
+    };
+    window.addEventListener('beforeinstallprompt', beforeInstallHandler as EventListener);
+    window.addEventListener('appinstalled', installedHandler);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', beforeInstallHandler as EventListener);
+      window.removeEventListener('appinstalled', installedHandler);
+    };
+  }, []);
+
+  const handleInstallApp = async () => {
+    if (!installPrompt) {
+      setInstallHelpOpen(true);
+      return;
+    }
+    const prompt = installPrompt;
+    setInstallPrompt(null);
+    try {
+      await prompt.prompt();
+      const result = await prompt.userChoice;
+      if (result.outcome === 'accepted') setAppInstalled(true);
+    } catch {
+      setInstallHelpOpen(true);
+    }
+  };
 
   const loadCatalog = useCallback(async (options: { page: number; replace?: boolean; query?: string; tab?: string }) => {
     const tab = options.tab ?? tabRef.current;
@@ -284,7 +358,13 @@ export default function App() {
           <span className="brand-mark">▮</span>
           <span>Drama <b>Reels</b></span>
         </button>
-        <div className="topbar-meta"><span className="live-dot" /> catálogo dublado em português</div>
+        <div className="topbar-actions">
+          <div className="topbar-meta"><span className="live-dot" /> catálogo dublado em português</div>
+          {!appInstalled && <button className="install-app-button" type="button" onClick={() => void handleInstallApp()} aria-haspopup="dialog">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" /></svg>
+            <span>Instalar app</span>
+          </button>}
+        </div>
       </header>
 
       {screen === 'catalog' ? (
@@ -373,6 +453,7 @@ export default function App() {
       {player && selectedDrama && (
         <PlayerModal drama={selectedDrama} initial={player} onClose={() => setPlayer(null)} onStarted={handlePlayerStarted} />
       )}
+      {installHelpOpen && <InstallHelpModal platform={installPlatform} onClose={() => setInstallHelpOpen(false)} />}
     </div>
   );
 }
@@ -448,6 +529,8 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
   const [paused, setPaused] = useState(false);
   const [touchStart, setTouchStart] = useState<number | null>(null);
   const [controlsVisible, setControlsVisible] = useState(true);
+  const [pipActive, setPipActive] = useState(false);
+  const [pipNotice, setPipNotice] = useState('');
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const current = episodes[activeIndex];
 
@@ -514,6 +597,24 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
   }, [videoUrl]);
 
   useEffect(() => {
+    setPipActive(false);
+    setPipNotice('');
+    const video = videoRef.current as WebkitVideoElement | null;
+    if (!video) return;
+    const syncPipState = () => {
+      setPipActive(document.pictureInPictureElement === video || video.webkitPresentationMode === 'picture-in-picture');
+    };
+    video.addEventListener('enterpictureinpicture', syncPipState);
+    video.addEventListener('leavepictureinpicture', syncPipState);
+    video.addEventListener('webkitpresentationmodechanged', syncPipState);
+    return () => {
+      video.removeEventListener('enterpictureinpicture', syncPipState);
+      video.removeEventListener('leavepictureinpicture', syncPipState);
+      video.removeEventListener('webkitpresentationmodechanged', syncPipState);
+    };
+  }, [videoUrl]);
+
+  useEffect(() => {
     const keyHandler = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose();
       if (event.key === 'ArrowDown') void loadEpisode(Math.min(episodes.length - 1, activeIndex + 1));
@@ -546,6 +647,34 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
     setCurrentTime(nextTime);
   };
 
+  const togglePictureInPicture = async () => {
+    const video = videoRef.current as WebkitVideoElement | null;
+    if (!video || !videoUrl) {
+      setPipNotice('Aguarde o início do episódio antes de ativar a janela flutuante.');
+      return;
+    }
+    setPipNotice('');
+    try {
+      if (video.webkitSupportsPresentationMode?.('picture-in-picture') && video.webkitSetPresentationMode) {
+        const nextMode = video.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture';
+        video.webkitSetPresentationMode(nextMode);
+        setPipActive(nextMode === 'picture-in-picture');
+        return;
+      }
+      if (document.pictureInPictureEnabled && typeof video.requestPictureInPicture === 'function') {
+        if (document.pictureInPictureElement === video && typeof document.exitPictureInPicture === 'function') {
+          await document.exitPictureInPicture();
+        } else {
+          await video.requestPictureInPicture();
+        }
+        return;
+      }
+      setPipNotice(pictureInPictureHelp());
+    } catch {
+      setPipNotice(pictureInPictureHelp());
+    }
+  };
+
   return (
     <div className="player-modal" role="dialog" aria-modal="true" aria-label="Player vertical">
       <div className="player-shell" onTouchStart={(event) => setTouchStart(event.touches[0].clientY)} onTouchEnd={(event) => handleTouchEnd(event.changedTouches[0].clientY)} onWheel={(event) => { if (Math.abs(event.deltaY) > 40) moveEpisode(event.deltaY > 0 ? 1 : -1); }} onClick={() => setControlsVisible((visible) => !visible)}>
@@ -554,16 +683,52 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
           <input type="range" min={0} max={duration || 0} step={0.25} value={Math.min(currentTime, duration || currentTime)} style={{ '--seek-progress': `${duration ? currentTime / duration * 100 : 0}%` } as React.CSSProperties} disabled={!duration} aria-label="Posição no episódio" aria-valuetext={`${formatTime(currentTime)} de ${formatTime(duration)}`} onInput={handleSeek} onChange={handleSeek} />
           <span className="player-time">{formatTime(currentTime)} / {formatTime(duration)}</span>
         </div>
-        {videoUrl ? <video ref={videoRef} key={videoUrl} className="player-video" autoPlay playsInline muted={muted} onLoadedMetadata={(event) => { const next = durationFromVideo(event.currentTarget); if (next > 0) setDuration(next); }} onDurationChange={(event) => { const next = durationFromVideo(event.currentTarget); if (next > 0) setDuration(next); }} onTimeUpdate={(event) => { const video = event.currentTarget; setCurrentTime(video.currentTime || 0); const next = durationFromVideo(video); if (next > 0) setDuration(next); }} onPlay={() => setPaused(false)} onPause={() => setPaused(true)} onError={() => setError('Não foi possível reproduzir este episódio. Tente novamente ou escolha outro.')} /> : <div className="player-loading"><span className="spinner" /><p>preparando episódio {current?.numero || ''}</p></div>}
+        {videoUrl ? <video ref={videoRef} key={videoUrl} className="player-video" autoPlay playsInline muted={muted} onLoadedMetadata={(event) => { const next = durationFromVideo(event.currentTarget); if (next > 0) setDuration(next); }} onDurationChange={(event) => { const next = durationFromVideo(event.currentTarget); if (next > 0) setDuration(next); }} onTimeUpdate={(event) => { const video = event.currentTarget; setCurrentTime(video.currentTime || 0); const next = durationFromVideo(video); if (next > 0) setDuration(next); }} onPlay={() => setPaused(false)} onPause={() => setPaused(false)} onEnded={() => { if (activeIndex < episodes.length - 1) moveEpisode(1); }} onError={() => setError('Não foi possível reproduzir este episódio. Tente novamente ou escolha outro.')} /> : <div className="player-loading"><span className="spinner" /><p>preparando episódio {current?.numero || ''}</p></div>}
         <div className="player-vignette" />
         {controlsVisible && <>
           <button className="player-close" onClick={(event) => { event.stopPropagation(); onClose(); }}>× <span>fechar</span></button>
           <div className="player-copy"><p className="eyebrow">{current?.seasonTitle || 'EPISÓDIO'}</p><h2>{drama.titulo}</h2><p>Episódio {current?.numero || '—'} <span>·</span> deslize para continuar</p></div>
-          <div className="player-controls" onClick={(event) => event.stopPropagation()}><button onClick={() => moveEpisode(-1)} disabled={activeIndex === 0} aria-label="Episódio anterior">↑</button><button className="play-button" onClick={togglePlay} aria-label={paused ? 'Reproduzir' : 'Pausar'}>{paused ? '▶' : 'Ⅱ'}</button><button onClick={() => moveEpisode(1)} disabled={activeIndex === episodes.length - 1} aria-label="Próximo episódio">↓</button><button onClick={() => setMuted((value) => !value)} aria-label={muted ? 'Ativar som' : 'Desativar som'}>{muted ? '⌁' : '◖'}</button></div>
+          <div className="player-controls" onClick={(event) => event.stopPropagation()}><button onClick={() => moveEpisode(-1)} disabled={activeIndex === 0} aria-label="Episódio anterior">↑</button><button className="play-button" onClick={togglePlay} aria-label={paused ? 'Reproduzir' : 'Pausar'}>{paused ? '▶' : 'Ⅱ'}</button><button onClick={() => moveEpisode(1)} disabled={activeIndex === episodes.length - 1} aria-label="Próximo episódio">↓</button><button onClick={() => setMuted((value) => !value)} aria-label={muted ? 'Ativar som' : 'Desativar som'}>{muted ? '⌁' : '◖'}</button><button className={pipActive ? 'pip-button active' : 'pip-button'} type="button" onClick={() => void togglePictureInPicture()} aria-label={pipActive ? 'Sair da janela flutuante' : 'Janela flutuante'} aria-pressed={pipActive} title="Janela flutuante"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><path d="M12.5 12.5h6v5h-6z" /></svg></button></div>
+          {pipNotice && <div className="pip-notice" role="status" onClick={(event) => event.stopPropagation()}><span>{pipNotice}</span><button type="button" onClick={() => setPipNotice('')} aria-label="Fechar aviso">×</button></div>}
           {error && <div className="player-error" onClick={(event) => event.stopPropagation()}><strong>Não carregou</strong><span>{error}</span><button onClick={() => void loadEpisode(activeIndex)}>tentar de novo</button></div>}
           <div className="swipe-label"><span>↑</span><span>deslize</span></div>
         </>}
       </div>
+    </div>
+  );
+}
+
+function InstallHelpModal({ platform, onClose }: { platform: InstallPlatform; onClose: () => void }) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [onClose]);
+
+  return (
+    <div className="install-overlay" role="presentation" onClick={onClose}>
+      <section className="install-card" role="dialog" aria-modal="true" aria-labelledby="install-title" onClick={(event) => event.stopPropagation()}>
+        <button className="install-close" type="button" onClick={onClose} aria-label="Fechar instruções">×</button>
+        <div className="install-app-icon" aria-hidden="true"><span className="brand-mark">▮</span></div>
+        <p className="eyebrow">SEU APP, NA TELA INICIAL</p>
+        <h2 id="install-title">Leve o Drama Reels com você</h2>
+        <p className="install-intro">Adicione o app à tela inicial para abrir suas histórias favoritas com um toque. É um web app — não precisa baixar APK.</p>
+        {platform === 'ios' ? <div className="install-steps">
+          <div className="install-step"><span>1</span><p><strong>Abra esta página no Safari</strong><small>Use o navegador Safari do iPhone ou iPad.</small></p></div>
+          <div className="install-step"><span>2</span><p><strong>Toque em Compartilhar</strong><small>É o ícone de compartilhar na barra do Safari.</small></p></div>
+          <div className="install-step"><span>3</span><p><strong>Escolha “Adicionar à Tela de Início”</strong><small>Confirme em “Adicionar” para concluir.</small></p></div>
+        </div> : platform === 'android' ? <div className="install-steps">
+          <div className="install-step"><span>1</span><p><strong>Use o Chrome</strong><small>Abra o Drama Reels no Chrome para Android.</small></p></div>
+          <div className="install-step"><span>2</span><p><strong>Toque em “Instalar app”</strong><small>Se o aviso não aparecer, abra o menu ⋮ e escolha “Instalar app” ou “Adicionar à tela inicial”.</small></p></div>
+        </div> : <div className="install-steps">
+          <div className="install-step"><span>1</span><p><strong>Abra o menu do navegador</strong><small>Procure “Instalar app” ou “Adicionar à tela inicial”.</small></p></div>
+          <div className="install-step"><span>2</span><p><strong>No iPhone, use o Safari</strong><small>Toque em Compartilhar e depois em “Adicionar à Tela de Início”.</small></p></div>
+        </div>}
+        <p className="install-footnote">As opções podem variar de acordo com o navegador e a versão do sistema.</p>
+        <button className="install-done" type="button" onClick={onClose}>Entendi</button>
+      </section>
     </div>
   );
 }

@@ -19,3 +19,8 @@
 - [ ] Fazer o deploy/redeploy no Render quando desejar. Nenhum deploy foi executado pelo Manus.
 - [ ] O fornecedor não identifica a diferença entre PT-BR e PT-PT; a marcação disponível é apenas `pt`/`[Dublado]`.
 - [ ] Cobertura do índice não é completa por limitação do fornecedor: várias rotas ignoram paginação e não há uma listagem global. A busca API retorna até aproximadamente 26 correspondências por termo.
+
+## Instalação móvel e janela flutuante
+
+- [x] O app deve poder ser instalado como web app (PWA), sem APK, em Android e iOS; a tela inicial deve ter um botão de instalação com visual alinhado à marca. O botão deve abrir o prompt nativo quando o navegador o oferecer e, no iPhone, orientar a instalação manual pela Tela de Início.
+- [x] Enquanto um episódio estiver tocando, o usuário deve poder ativar Picture-in-Picture para manter o vídeo em janela flutuante ao alternar para o WhatsApp, quando navegador e sistema oferecerem suporte; se não oferecerem, mostrar uma orientação clara sem encerrar o player.

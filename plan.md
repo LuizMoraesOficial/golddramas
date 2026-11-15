@@ -26,3 +26,10 @@ A API não oferece uma listagem completa paginável: apenas `new` tem janelas ú
 - Nenhum deploy foi feito nesta tarefa.
 
 Consulte `docs/APISHORT_INTEGRACAO.md`, `docs/API_GUIA.md` e `docs/RENDER_DEPLOY.md` para detalhes.
+
+
+## Extensão PWA e Picture-in-Picture (15/nov/2026)
+
+O app será instalável como PWA, sem APK, com manifest próprio, ícones de marca, registro de service worker e botão de instalação na tela inicial. Em navegadores com `beforeinstallprompt`, o botão abre o fluxo nativo; em iPhone, ele apresenta o caminho manual de Safari/Compartilhar/Adicionar à Tela de Início. O cache offline fica restrito ao shell e assets; `/api/` e `/media/` não serão armazenados.
+
+O player oferecerá uma ação explícita de janela flutuante para o usuário ativar PiP antes de alternar para outro app. A implementação usará a API padrão e a de apresentação WebKit quando disponíveis. PiP depende de gesto do usuário, navegador e sistema operacional; PWAs iOS instaladas têm uma limitação WebKit conhecida e a interface deve apresentar fallback em vez de prometer sobreposição em todos os iPhones.
