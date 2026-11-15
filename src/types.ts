@@ -47,6 +47,7 @@ export type Episode = {
   gratis?: boolean;
   publicado?: boolean;
   urlVideo?: string;
+  urlVideoExpiraEm?: number;
 };
 
 export type Pagination = {

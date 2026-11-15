@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { endStream, ensureVisitor, getDrama, heartbeat, listCategories, listDramas, listSeedDramas, resetVisitor, startStream } from './api';
+import { ensureVisitor, getDrama, listCategories, listDramas } from './api';
 import type { Category, Drama, Episode, Season } from './types';
 
 const FALLBACK_COVER = 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?auto=format&fit=crop&w=900&q=80';
@@ -76,28 +76,10 @@ export default function App() {
     setCatalogError('');
     setLoading(true);
     try {
-      let result: Awaited<ReturnType<typeof listDramas>>;
-      try {
-        result = await listDramas(nextPage, 30, query, '', '', category === '__free__');
-      } catch (firstError) {
-        if (nextPage !== 1) throw firstError;
-        resetVisitor(true);
-        await ensureVisitor();
-        try {
-          result = await listDramas(nextPage, 30, query, '', '', category === '__free__');
-        } catch {
-          // Alguns estados antigos do backend rejeitam o filtro `tipo`; tente a rota base.
-          try {
-            result = await listDramas(nextPage, 30, query, '', '', category === '__free__');
-          } catch {
-            // O cache é apenas um plano de continuidade para o protótipo temporário.
-            if (query) throw new Error('Não foi possível pesquisar agora. Tente novamente.');
-            result = await listSeedDramas();
-          }
-        }
-      }
+      const result = await listDramas(nextPage, 30, query, '', category);
       if (requestId !== catalogRequestRef.current) return;
-      const visibleDramas = category && category !== '__free__'
+      const remoteCategory = ['__new__', '__hot__', '__category1__'].includes(category);
+      const visibleDramas = category && !remoteCategory
         ? result.dramas.filter((drama) => belongsToCategory(drama, category))
         : result.dramas;
       setDramas((current) => {
@@ -130,15 +112,7 @@ export default function App() {
         }
         await catalogPromise;
       } catch (error) {
-        try {
-          const seed = await listSeedDramas();
-          setDramas(seed.dramas);
-          setPage(1);
-          setHasMore(false);
-          setCatalogError('');
-        } catch {
-          setCatalogError(error instanceof Error ? error.message : 'Não foi possível iniciar a sessão.');
-        }
+        setCatalogError(error instanceof Error ? error.message : 'Não foi possível iniciar a sessão.');
         setLoading(false);
       }
     })();
@@ -232,6 +206,7 @@ export default function App() {
 
   const filteredDramas = useMemo(() => {
     if (activeCategory === '__mylist__') return myList;
+    if (['__new__', '__hot__', '__category1__'].includes(activeCategory)) return dramas;
     if (activeCategory === '__free__') return dramas.filter((drama) => drama.gratis === true);
     if (!activeCategory) return dramas;
     return dramas.filter((drama) => belongsToCategory(drama, activeCategory));
@@ -274,14 +249,16 @@ export default function App() {
 
           <div className="catalog-search" role="search">
             <span className="search-icon" aria-hidden="true">⌕</span>
-            <input value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="Pesquisar dorama por título" aria-label="Pesquisar dorama por título" />
+            <input value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="Pesquisar nos títulos carregados" aria-label="Pesquisar dorama por título" />
             {searchInput && <button type="button" className="clear-search" onClick={() => setSearchInput('')} aria-label="Limpar pesquisa">×</button>}
           </div>
 
           <nav className="category-tabs" aria-label="Categorias de doramas">
             <button className={activeCategory === '__mylist__' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('__mylist__')} aria-selected={activeCategory === '__mylist__'}>Minha lista</button>
             <button className={activeCategory === '' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('')} aria-selected={activeCategory === ''}>Todos</button>
-            <button className={activeCategory === '__free__' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('__free__')} aria-selected={activeCategory === '__free__'}>Grátis</button>
+            <button className={activeCategory === '__new__' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('__new__')} aria-selected={activeCategory === '__new__'}>Novidades</button>
+            <button className={activeCategory === '__hot__' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('__hot__')} aria-selected={activeCategory === '__hot__'}>Em alta</button>
+            <button className={activeCategory === '__category1__' ? 'category-tab active' : 'category-tab'} type="button" onClick={() => selectCategory('__category1__')} aria-selected={activeCategory === '__category1__'}>Categoria 1</button>
             {categories.map((category) => <button className={activeCategory === category.slug ? 'category-tab active' : 'category-tab'} type="button" key={`${category.slug}-${category.nome}`} onClick={() => selectCategory(category.slug)} aria-selected={activeCategory === category.slug}>{category.nome}</button>)}
           </nav>
 
@@ -351,19 +328,20 @@ function DetailView({ drama, loading, error, onBack, onOpenEpisode }: { drama: D
           <h1>{drama.titulo}</h1>
           <div className="detail-meta"><span>{drama.totalEpisodios || episodes.length} episódios</span><span>{drama.anoLancamento || '2026'}</span><span>{drama.idiomaTagManual || drama.idioma || 'Dublado'}</span></div>
           <p className="detail-synopsis">{drama.sinopse || 'Uma história para assistir no seu ritmo, episódio após episódio.'}</p>
-          <div className="detail-actions"><button className="primary-button" onClick={() => episodes[0] && onOpenEpisode(episodes[0])}>▶ assistir agora</button><span className="swipe-hint">deslize para navegar</span></div>
+          <div className="detail-actions"><button className="primary-button" type="button" disabled={!episodes[0]?.urlVideo} onClick={() => episodes[0]?.urlVideo && onOpenEpisode(episodes[0])}>{episodes[0]?.urlVideo ? '▶ assistir agora' : 'vídeo não fornecido'}</button><span className="swipe-hint">{episodes[0]?.urlVideo ? 'HLS oficial · link temporário' : 'sem URL de vídeo para este título'}</span></div>
         </div>
       </section>
 
       {error && <ErrorPanel message={error} onRetry={() => window.location.reload()} />}
       <section className="episodes-section">
         <div className="section-heading"><div><p className="eyebrow">CONTINUE DE ONDE PAROU</p><h2>Todos os episódios</h2></div><span>{episodes.length} disponíveis</span></div>
+        <p className="detail-synopsis">{episodes.some((episode) => episode.urlVideo) ? 'Links de vídeo temporários; o player abre o episódio selecionado.' : 'Não há link de vídeo disponível para estes episódios.'}</p>
         {drama.temporadas?.map((season: Season) => (
           <div className="season-block" key={season.numero}>
             <div className="season-heading"><span>{String(season.numero).padStart(2, '0')}</span><h3>{season.titulo}</h3></div>
-            <div className="episode-grid">{season.episodios.map((episode) => <button className="episode-card" key={`${season.numero}-${episode.numero}`} onClick={() => onOpenEpisode({ ...episode, seasonNumber: season.numero, seasonTitle: season.titulo })}>
-              <span className="episode-thumb">{episode.thumbnail ? <img src={episode.thumbnail} alt="" /> : <span>{String(episode.numero).padStart(2, '0')}</span>}<i>▶</i></span>
-              <span className="episode-text"><strong>Episódio {episode.numero}</strong><small>{formatDuration(episode.duracaoSegundos) || 'assistir agora'}</small></span>
+            <div className="episode-grid">{season.episodios.map((episode) => <button className="episode-card" type="button" disabled={!episode.urlVideo} key={`${season.numero}-${episode.numero}`} onClick={() => episode.urlVideo && onOpenEpisode({ ...episode, seasonNumber: season.numero, seasonTitle: season.titulo })}>
+              <span className="episode-thumb">{episode.thumbnail ? <img src={episode.thumbnail} alt="" /> : <span>{String(episode.numero).padStart(2, '0')}</span>}<i>{episode.urlVideo ? '▶' : '—'}</i></span>
+              <span className="episode-text"><strong>Episódio {episode.numero}</strong><small>{formatDuration(episode.duracaoSegundos) || (episode.urlVideo ? 'assistir agora' : 'vídeo indisponível')}</small></span>
             </button>)}</div>
           </div>
         ))}
@@ -377,15 +355,12 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
   const initialIndex = Math.max(0, episodes.findIndex((episode) => episode.seasonNumber === initial.season && episode.numero === initial.episode));
   const [activeIndex, setActiveIndex] = useState(initialIndex);
   const [videoUrl, setVideoUrl] = useState('');
-  const [sourceUrl, setSourceUrl] = useState('');
-  const [sessionId, setSessionId] = useState('');
   const [error, setError] = useState('');
   const [muted, setMuted] = useState(false);
   const [paused, setPaused] = useState(false);
   const [touchStart, setTouchStart] = useState<number | null>(null);
   const [controlsVisible, setControlsVisible] = useState(true);
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const hlsRef = useRef<unknown>(null);
   const current = episodes[activeIndex];
 
   const loadEpisode = useCallback(async (index: number) => {
@@ -393,29 +368,56 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
     if (!episode) return;
     setActiveIndex(index);
     setVideoUrl('');
-    setSourceUrl('');
     setError('');
     setPaused(false);
     try {
-      const stream = await startStream(drama._id, episode.seasonNumber, episode.numero, 'mp4');
-      if (!stream.urlVideo) throw new Error('O servidor não retornou um vídeo para este episódio.');
-      setSourceUrl(stream.urlVideo);
-      setVideoUrl(stream.urlVideo);
+      if (!episode.urlVideo) throw new Error('Este episódio não possui um vídeo disponível.');
+      setVideoUrl(episode.urlVideo);
       onStarted();
-      if (stream.streamSessionId) setSessionId(stream.streamSessionId);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Não foi possível carregar este episódio.');
     }
-  }, [drama._id, episodes, onStarted]);
+  }, [episodes, onStarted]);
 
   useEffect(() => { void loadEpisode(initialIndex); }, [initialIndex, loadEpisode]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => { if (sessionId) void heartbeat(sessionId); }, 25000);
-    return () => window.clearInterval(timer);
-  }, [sessionId]);
-
-  useEffect(() => () => { if (sessionId) void endStream(sessionId); }, [sessionId]);
+    if (!videoUrl || !videoRef.current) return;
+    const video = videoRef.current;
+    const isHls = videoUrl.toLowerCase().includes('.m3u8');
+    const mediaUrl = isHls ? `/media/hls?url=${encodeURIComponent(videoUrl)}` : videoUrl;
+    let cancelled = false;
+    let destroyHls: (() => void) | undefined;
+    if (!isHls || video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = mediaUrl;
+      void video.play().catch(() => setPaused(true));
+      return;
+    }
+    void import('hls.js').then(({ default: Hls }) => {
+      if (cancelled) return;
+      if (!Hls.isSupported()) {
+        setError('Este navegador não oferece suporte à reprodução HLS. Tente Safari ou um navegador com Media Source Extensions.');
+        return;
+      }
+      const hls = new Hls({ enableWorker: true });
+      destroyHls = () => hls.destroy();
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.fatal) {
+          setError('O stream HLS falhou ao carregar. O link pode ter expirado; tente novamente para recarregar os dados.');
+          setPaused(true);
+        }
+      });
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        void video.play().catch(() => setPaused(true));
+      });
+      hls.loadSource(mediaUrl);
+      hls.attachMedia(video);
+    }).catch(() => setError('Não foi possível iniciar o decodificador HLS neste navegador.'));
+    return () => {
+      cancelled = true;
+      destroyHls?.();
+    };
+  }, [videoUrl]);
 
   useEffect(() => {
     const keyHandler = (event: KeyboardEvent) => {
@@ -444,14 +446,7 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
       <div className="player-shell" onTouchStart={(event) => setTouchStart(event.touches[0].clientY)} onTouchEnd={(event) => handleTouchEnd(event.changedTouches[0].clientY)} onWheel={(event) => { if (Math.abs(event.deltaY) > 40) moveEpisode(event.deltaY > 0 ? 1 : -1); }} onClick={() => setControlsVisible((visible) => !visible)}>
         <div className="player-topline"><span className="player-brand">DRAMA <b>REELS</b></span><span>{String(activeIndex + 1).padStart(2, '0')} <i>/</i> {String(episodes.length).padStart(2, '0')}</span></div>
         <div className="player-progress"><span style={{ width: `${((activeIndex + 1) / Math.max(episodes.length, 1)) * 100}%` }} /></div>
-        {videoUrl ? <video ref={videoRef} key={videoUrl} className="player-video" src={videoUrl} autoPlay playsInline muted={muted} onPlay={() => setPaused(false)} onPause={() => setPaused(true)} onError={() => {
-          if (sourceUrl && videoUrl === sourceUrl) {
-            setError('Convertendo o vídeo para um formato compatível…');
-            setVideoUrl(`/media?url=${encodeURIComponent(sourceUrl)}`);
-          } else {
-            setError('O navegador não conseguiu decodificar este vídeo.');
-          }
-        }} /> : <div className="player-loading"><span className="spinner" /><p>preparando episódio {current?.numero || ''}</p></div>}
+        {videoUrl ? <video ref={videoRef} key={videoUrl} className="player-video" autoPlay playsInline muted={muted} onPlay={() => setPaused(false)} onPause={() => setPaused(true)} onError={() => setError('O navegador não conseguiu reproduzir este vídeo HLS. Verifique o suporte do navegador ou tente novamente.')} /> : <div className="player-loading"><span className="spinner" /><p>preparando episódio {current?.numero || ''}</p></div>}
         <div className="player-vignette" />
         {controlsVisible && <>
           <button className="player-close" onClick={(event) => { event.stopPropagation(); onClose(); }}>× <span>fechar</span></button>

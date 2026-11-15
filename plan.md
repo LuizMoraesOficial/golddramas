@@ -1,47 +1,22 @@
-# Plano — Drama Reels (protótipo temporário)
+# Plano — GoldDramas
 
 ## Escopo
 
-Construir um protótipo web rápido para testar o catálogo GoldDramas usando as rotas recuperadas do APK. O protótipo terá autenticação automática como visitante, catálogo contínuo de capas, página de detalhe e um player vertical em tela cheia com navegação por gesto para cima/baixo entre episódios. Não haverá cadastro, cobrança, persistência própria ou acabamento de produto definitivo.
+Atualizar o projeto React/Vite existente, preservando sua identidade, navegação e responsividade. Consumir conteúdo real pela camada Express e usar a chave somente no backend por variável de ambiente. Não publicar a aplicação nesta tarefa.
 
-## Implementação
+## Implementação atual
 
-- **Frontend:** React + TypeScript + Vite, com estado local e CSS responsivo.
-- **Backend leve:** Node/Express para servir o build e atuar como proxy same-origin para `https://api.dsstv.online/api/v1`, evitando CORS no navegador e mantendo a base da API fora do código de UI.
-- **Sessão:** ao abrir o site, gerar um `deviceId` persistente em `localStorage`, chamar `POST /api/auth/app/visitante`, e guardar o JWT apenas no armazenamento local da sessão de teste.
-- **Catálogo:** `GET /api/app/dramas?pagina=&limite=12&tipo=shortDrama`, com carregamento inicial leve e paginação ao aproximar do fim; mostrar capas de mini séries em uma lista vertical sequencial.
-- **Detalhe:** ao clicar, carregar `GET /api/app/dramas/{_id}` e exibir título, sinopse, metadados e lista de temporadas/episódios.
-- **Streaming:** `POST /api/app/stream/iniciar` com `dramaId`, `temporadaNumero` e `episodioNumero`; enviar `X-Video-Formato: hls`, guardar `streamSessionId` quando retornado e fazer heartbeat periódico; encerrar ao sair do player.
-- **Player Reels:** overlay em viewport móvel, `video` com `playsInline`, seleção de episódio, wheel e touch vertical para avançar/voltar, além de botão fechar, play/pause, mudo e indicador do episódio.
-- **Rotas declaradas:** `/` e `/drama/:id` para o manifest de rotas; o player será um modal da tela de detalhe para manter o protótipo simples.
+- **Catálogo:** “Todos” une e deduplica `popular` página 1, `new` páginas 1 e 2 e `category/1` página 1. Itens sem marcador explícito de dublagem em português são descartados. A amostra ao vivo encontrou 68 títulos únicos; o fornecedor repetia IDs e conteúdo entre respostas.
+- **Filtros:** “Novidades”, “Em alta” e “Categoria 1” usam os endpoints conhecidos. Busca continua local nos títulos já carregados; não inventa parâmetros de busca ou IDs de categoria.
+- **Segredo:** `APISHORT_API_KEY` é lida por `process.env`; localmente `apishort.js` carrega `.env` ignorado pelo Git. Não há campo, endpoint de importação ou credencial no frontend. O Render injeta a variável pelo Environment do serviço.
+- **Backend:** Express autentica pelo header `X-API-Key`, usa allowlist e timeout, retorna erros genéricos à interface e mantém cache de dois minutos para respostas de catálogo.
+- **Detalhes e player:** `alleps/{id}` fornece episódios e URLs HLS. Um relay same-origin restrito ao host oficial de mídia reescreve manifestos/segmentos para permitir reprodução. HLS.js é carregado quando necessário.
+- **Preview:** desenvolvimento em Vite na porta 3000, backend API local na 3001 e relay de mídia na 3002. O servidor Express de produção serve o build na porta `PORT`.
 
-## Direção visual — Cinema Noturno Neon
+## Variáveis no Render
 
-- **Movimento:** interface cinematográfica escura, com capas dominantes e acentos magenta elétricos para streaming móvel e descoberta rápida.
-- **Princípios:** foco total no conteúdo; contraste alto; camadas translúcidas discretas; feedback imediato em gestos e carregamentos.
-- **Cores:** fundo quase preto roxo (`#0b0710`), superfícies ameixa (`#17101f`), texto lavanda claro e magenta elétrico (`#e6007e`) para ações/estado ativo.
-- **Layout:** catálogo em coluna de cards horizontais largos, com capa vertical e texto em overlay; detalhe em composição editorial; player ocupa toda a viewport.
-- **Assinaturas:** brilho magenta sob a marca, chips de gênero em cápsula e uma linha de progresso/episódio no topo do player.
-- **Interação:** cliques abrem conteúdo; deslizar verticalmente muda de episódio; feedback mostra “Próximo episódio”/“Episódio anterior”; os controles ficam sobrepostos e desaparecem suavemente.
-- **Animação:** entrada dos cards com fade/translate curto; transições de rota e player sem efeitos pesados; respeitar `prefers-reduced-motion`.
-- **Tipografia:** Sora para títulos e interface, com pesos fortes para títulos e labels compactas; corpo em Sora regular com boa legibilidade em fundo escuro.
-- **Essência:** um laboratório visual para testar descoberta e reprodução vertical de doramas, rápido e sem compromisso de produto final. Personalidade: cinematográfica, ágil, imersiva.
-- **Voz:** curta e direta. Exemplos: “Escolha uma história.” / “Deslize para continuar.”
-- **Marca:** wordmark “Drama Reels” com “Reels” em magenta e um pequeno marcador vertical sugerindo swipe.
-- **Cor proprietária:** magenta elétrico `#E6007E`.
+Obrigatória: `APISHORT_API_KEY`. O `.env` local nunca deve ser enviado ao Git. Comandos sugeridos: Build `pnpm install --frozen-lockfile && pnpm build`; Start `pnpm start`. Consulte [docs/RENDER_DEPLOY.md](docs/RENDER_DEPLOY.md).
 
-## Estrutura
+## Limitação de idioma
 
-```text
-index.html
-server.js
-vite.config.ts
-package.json
-public/manus-routes.json
-src/
-  main.tsx          # entrada React
-  App.tsx           # catálogo, detalhe e modal player
-  api.ts            # sessão visitante, catálogo e streaming
-  types.ts          # tipos de domínio
-  styles.css        # sistema visual e responsividade
-```
+A API sinaliza `pt`, mas não fornece distinção `pt-BR`/pt-PT nem metadados regionais de áudio. O filtro usa `lang=pt` e marcação `[Dublado]`; a confirmação de variante regional depende do fornecedor.

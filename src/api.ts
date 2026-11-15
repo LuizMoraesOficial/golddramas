@@ -1,141 +1,177 @@
-import type { Category, Drama, DramaPage, StreamResponse } from './types';
+import type { Category, Drama, Episode } from './types';
 
 const API_ROOT = '/api';
-const TOKEN_KEY = 'drama_reels_token';
-const DEVICE_KEY = 'drama_reels_device';
-let visitorPromise: Promise<void> | null = null;
+const PORTUGUESE_DUB_MARKER = /^\s*\[(?:dublado|dublada|dublado em português|dublada em português)\]\s*/i;
+type UnknownRecord = Record<string, unknown>;
 
-function getDeviceId() {
-  let id = localStorage.getItem(DEVICE_KEY);
-  if (!id) {
-    id = `web_${crypto.randomUUID().replaceAll('-', '').slice(0, 20)}`;
-    localStorage.setItem(DEVICE_KEY, id);
+function asRecord(value: unknown): UnknownRecord {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as UnknownRecord : {};
+}
+
+function firstString(source: UnknownRecord, keys: string[]) {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (typeof value === 'number') return String(value);
   }
-  return id;
+  return '';
 }
 
-function getToken() {
-  return sessionStorage.getItem(TOKEN_KEY);
-}
-
-function setToken(token: string) {
-  sessionStorage.setItem(TOKEN_KEY, token);
-}
-
-export function resetVisitor(rotateDevice = false) {
-  sessionStorage.removeItem(TOKEN_KEY);
-  if (rotateDevice) localStorage.removeItem(DEVICE_KEY);
-}
-
-async function request<T>(path: string, init: RequestInit = {}, extraHeaders: Record<string, string> = {}) {
-  const token = getToken();
-  const headers = new Headers(init.headers);
-  headers.set('Accept', 'application/json');
-  if (init.body) headers.set('Content-Type', 'application/json');
-  if (token) headers.set('Authorization', `Bearer ${token}`);
-  Object.entries(extraHeaders).forEach(([key, value]) => headers.set(key, value));
-
-  const response = await fetch(`${API_ROOT}${path}`, { ...init, headers });
-  const data = (await response.json()) as T & { mensagem?: string; sucesso?: boolean };
-  if (!response.ok || data.sucesso === false) {
-    throw new Error(data.mensagem || `O servidor respondeu ${response.status}.`);
+function unwrap(value: unknown): unknown {
+  let current = value;
+  for (let depth = 0; depth < 3; depth += 1) {
+    const object = asRecord(current);
+    const next = object.data ?? object.result ?? object.response;
+    if (next === undefined) break;
+    current = next;
   }
-  return data;
+  return current;
 }
 
-export async function ensureVisitor() {
-  if (getToken()) return;
-  if (visitorPromise) return visitorPromise;
-  visitorPromise = (async () => {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        const response = await request<{ sucesso: boolean; dados: { token: string } }>('/auth/app/visitante', {
-          method: 'POST',
-          body: JSON.stringify({ deviceId: getDeviceId() }),
-        });
-        setToken(response.dados.token);
-        return;
-      } catch (error) {
-        lastError = error;
-        resetVisitor(true);
-      }
-    }
-    throw lastError instanceof Error ? lastError : new Error('Não foi possível iniciar a sessão visitante.');
-  })();
-  return visitorPromise.finally(() => {
-    visitorPromise = null;
-  });
+function arrayFrom(value: unknown, keys: string[]): unknown[] {
+  const unwrapped = unwrap(value);
+  if (Array.isArray(unwrapped)) return unwrapped;
+  const record = asRecord(unwrapped);
+  for (const key of keys) {
+    if (Array.isArray(record[key])) return record[key] as unknown[];
+  }
+  return [];
 }
 
-export async function listCategories() {
-  await ensureVisitor();
-  const response = await request<{ sucesso: boolean; dados: Category[] }>('/app/categorias');
-  const seen = new Set<string>();
-  return response.dados.filter((category) => {
-    if (category.tipo === 'secao') return false;
-    const key = category.nome.trim().toLocaleLowerCase();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+function hasPortugueseDubMarker(value: unknown) {
+  const item = asRecord(value);
+  const title = firstString(item, ['name', 'title', 'drama_name', 'book_name']);
+  if (PORTUGUESE_DUB_MARKER.test(title)) return true;
+  const explicitLanguage = firstString(item, ['audio_language', 'audioLanguage', 'dub_language', 'dubLanguage', 'audio_lang']).toLowerCase();
+  const explicitDub = item.dubbed === true || item.is_dubbed === true || item.isDubbed === true;
+  return explicitDub && /^(pt|pt-br|portuguese|português)(\b|[-_])/i.test(explicitLanguage);
 }
 
-export async function listDramas(page = 1, limit = 30, busca = '', tipo = '', categoria = '', gratis = false) {
-  await ensureVisitor();
-  const search = busca ? `&busca=${encodeURIComponent(busca)}` : '';
-  const filter = tipo ? `&tipo=${encodeURIComponent(tipo)}` : '';
-  const category = categoria ? `&categoria=${encodeURIComponent(categoria)}` : '';
-  const free = gratis ? '&gratis=true' : '';
-  const response = await request<DramaPage>(`/app/dramas?pagina=${page}&limite=${limit}${search}${filter}${category}${free}`);
-  return { dramas: response.dados, pagination: response.paginacao };
+function normalizeEpisode(value: unknown, index: number): Episode {
+  const item = asRecord(value);
+  const video = asRecord(item.video);
+  const urlVideo = firstString(item, ['video_url', 'videoUrl', 'url', 'play_url', 'playUrl'])
+    || firstString(video, ['video_720', 'video_480', 'video_1080']);
+  return {
+    _id: firstString(item, ['id', 'episode_id', 'episodeId', 'vid']),
+    numero: Number(item.number ?? item.episode ?? item.episode_number ?? item.index ?? index + 1) || index + 1,
+    titulo: firstString(item, ['title', 'name', 'episode_title']) || `Episódio ${index + 1}`,
+    descricao: firstString(item, ['description', 'desc']),
+    thumbnail: firstString(item, ['thumbnail', 'cover', 'image', 'thumb']),
+    duracaoSegundos: Number(item.duration ?? item.duration_seconds ?? 0) || undefined,
+    urlVideo,
+    urlVideoExpiraEm: Number(item.expires ?? item.video_expires ?? 0) || undefined,
+  };
 }
 
-export async function listSeedDramas() {
-  const response = await fetch('/catalog-seed.json', { cache: 'no-store' });
-  if (!response.ok) throw new Error('Cache inicial indisponível.');
-  const data = (await response.json()) as DramaPage;
-  return { dramas: data.dados, pagination: data.paginacao };
+function normalizeDrama(value: unknown, index: number): Drama {
+  const item = asRecord(value);
+  const rawEpisodes = arrayFrom(item, ['episodes', 'episode_list', 'episodeList', 'videos']);
+  const categoryValue = item.categories ?? item.category ?? item.tags ?? item.genres;
+  const labels = Array.isArray(categoryValue)
+    ? categoryValue.map((entry) => typeof entry === 'string' ? entry : firstString(asRecord(entry), ['name', 'title', 'labelName'])).filter(Boolean)
+    : typeof categoryValue === 'string' ? [categoryValue] : [];
+  const sourceTitle = firstString(item, ['title', 'name', 'drama_name', 'book_name']) || 'Título não informado';
+  return {
+    _id: firstString(item, ['id', 'drama_id', 'dramaId', 'book_id', 'bookId', 'short_play_id', 'code']) || `shortmax-${index}`,
+    titulo: sourceTitle.replace(PORTUGUESE_DUB_MARKER, ''),
+    slug: firstString(item, ['slug']),
+    sinopse: firstString(item, ['description', 'desc', 'synopsis', 'intro', 'summary']),
+    tipo: 'shortDrama',
+    idioma: 'pt',
+    idiomaTagManual: 'Dublado em português',
+    anoLancamento: Number(item.year ?? item.release_year) || undefined,
+    capaPrincipal: firstString(item, ['cover', 'cover_url', 'poster', 'image', 'vertical_cover']),
+    capaVertical: firstString(item, ['vertical_cover', 'cover', 'cover_url', 'poster', 'image']),
+    thumbnail: firstString(item, ['thumbnail', 'thumb']),
+    trailer: firstString(item, ['trailer']),
+    totalEpisodios: Number(item.episode_count ?? item.total_episodes ?? item.totalEpisodes ?? (typeof item.episodes === 'number' ? item.episodes : rawEpisodes.length)) || undefined,
+    generos: labels,
+    tags: labels,
+    novo: Boolean(item.is_new ?? item.new),
+    destaque: Boolean(item.featured ?? item.is_hot),
+    temporadas: rawEpisodes.length ? [{ numero: 1, titulo: 'Episódios', episodios: rawEpisodes.map(normalizeEpisode) }] : [],
+  };
 }
 
-export async function getDrama(id: string) {
-  await ensureVisitor();
-  const response = await request<{ sucesso: boolean; dados: Drama }>(`/app/dramas/${id}`);
-  return response.dados;
+async function request<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_ROOT}${path}`, { headers: { Accept: 'application/json' }, cache: 'no-store' });
+  const contentType = response.headers.get('content-type') || '';
+  const payload = contentType.includes('application/json') ? await response.json() : null;
+  if (!response.ok) {
+    const error = payload && typeof payload === 'object' ? (payload as UnknownRecord).error : null;
+    throw new Error(typeof error === 'string' ? error : `O servidor respondeu HTTP ${response.status}.`);
+  }
+  return payload as T;
 }
 
-export async function startStream(dramaId: string, seasonNumber: number, episodeNumber: number, format = 'mp4') {
-  await ensureVisitor();
-  const body = JSON.stringify({ dramaId, temporadaNumero: seasonNumber, episodioNumero: episodeNumber });
-  let response: StreamResponse;
+export async function ensureVisitor() { /* A autenticação é feita exclusivamente pelo servidor. */ }
+export function resetVisitor(_rotateDevice = false) { /* Não há credenciais armazenadas no navegador. */ }
+
+export async function listCategories(): Promise<Category[]> {
+  // A documentação ShortMax lista category/{id}, mas não publica um índice completo de categorias.
+  return [];
+}
+
+const catalogCache = new Map<string, Promise<unknown>>();
+
+async function loadCatalogSource(route: string, page: number) {
+  const key = `${route}:${page}`;
+  let pending = catalogCache.get(key);
+  if (!pending) {
+    pending = request<unknown>(`/${route}?lang=pt&page=${page}`);
+    catalogCache.set(key, pending);
+  }
   try {
-    response = await request<StreamResponse>('/app/stream/iniciar', {
-      method: 'POST',
-      body,
-    }, { 'X-Video-Formato': format });
-  } catch (firstError) {
-    resetVisitor(true);
-    await ensureVisitor();
-    try {
-      response = await request<StreamResponse>('/app/stream/iniciar', {
-        method: 'POST',
-        body,
-      }, { 'X-Video-Formato': format });
-    } catch {
-      throw firstError;
-    }
+    return await pending;
+  } catch (error) {
+    catalogCache.delete(key);
+    throw error;
   }
-  return response.dados || {};
 }
 
-export async function heartbeat(streamSessionId?: string) {
-  const headers: Record<string, string> = {};
-  if (streamSessionId) headers['x-stream-session'] = streamSessionId;
-  await request('/app/stream/heartbeat', { method: 'POST', body: JSON.stringify({}) }, headers);
+export async function listDramas(page = 1, _limit = 30, search = '', _tipo = '', category = '', _free = false) {
+  const sources: Array<[string, number]> = category === '__new__'
+    ? [['new', 1], ['new', 2]]
+    : category === '__hot__'
+      ? [['hot', 1]]
+      : category === '__category1__'
+        ? [['category/1', 1]]
+        : [['popular', 1], ['new', 1], ['new', 2], ['category/1', 1]];
+  const payloads: unknown[] = [];
+  for (const [route, sourcePage] of sources) {
+    payloads.push(await loadCatalogSource(route, sourcePage));
+  }
+  const rows = payloads.flatMap((payload) => arrayFrom(payload, ['dramas', 'list', 'items', 'books', 'data']));
+  const seenIds = new Set<string>();
+  const normalizedSearch = search.trim().toLocaleLowerCase();
+  const dramas = rows
+    .filter(hasPortugueseDubMarker)
+    .filter((value) => {
+      const item = asRecord(value);
+      const id = firstString(item, ['id', 'drama_id', 'dramaId', 'book_id', 'bookId', 'code']) || firstString(item, ['name', 'title']);
+      if (seenIds.has(id)) return false;
+      seenIds.add(id);
+      return true;
+    })
+    .map(normalizeDrama)
+    .filter((drama) => !normalizedSearch || drama.titulo.toLocaleLowerCase().includes(normalizedSearch));
+  return { dramas, pagination: { total: dramas.length, pagina: page, totalPaginas: 1 } };
 }
 
-export async function endStream(streamSessionId?: string) {
-  const headers: Record<string, string> = {};
-  if (streamSessionId) headers['x-stream-session'] = streamSessionId;
-  await request('/app/stream/encerrar', { method: 'POST', body: JSON.stringify({}) }, headers);
+export async function getDrama(id: string): Promise<Drama> {
+  // ShortMax retorna metadados, episódios e URLs HLS assinadas juntos em alleps/{id}.
+  const payload = await request<unknown>(`/alleps/${encodeURIComponent(id)}?lang=pt`);
+  const detail = unwrap(payload);
+  if (!hasPortugueseDubMarker(detail)) {
+    throw new Error('Este título não está identificado como dublado em português pelo catálogo.');
+  }
+  const drama = normalizeDrama(detail, 0);
+  const episodes = arrayFrom(payload, ['episodes', 'episode_list', 'episodeList', 'videos', 'list', 'items']).map(normalizeEpisode);
+  return {
+    ...drama,
+    _id: id,
+    temporadas: episodes.length ? [{ numero: 1, titulo: 'Episódios', episodios: episodes }] : [],
+    totalEpisodios: episodes.length || drama.totalEpisodios,
+  };
 }
