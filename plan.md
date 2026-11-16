@@ -28,6 +28,11 @@ A API não oferece uma listagem completa paginável: apenas `new` tem janelas ú
 Consulte `docs/APISHORT_INTEGRACAO.md`, `docs/API_GUIA.md` e `docs/RENDER_DEPLOY.md` para detalhes.
 
 
+## Retomada de episódios e estados assistidos
+
+Persistir no `localStorage`, por ID estável do dorama, a temporada/episódio selecionado mais recentemente, o segundo exato da reprodução e a lista dos episódios concluídos identificados por temporada + número. Ao abrir o detalhe, “Assistir agora” deve retomar o episódio salvo e buscar para a posição armazenada quando disponível; cair para o primeiro episódio reproduzível quando não houver estado salvo. O player atualiza a posição durante a reprodução e ao sair/ocultar a janela, e marca a conclusão no evento de término; os cards distinguem “continuar” de “assistido”. Sem alteração de API/backend.
+
+
 ## Extensão PWA e Picture-in-Picture (15/nov/2026)
 
 O app será instalável como PWA, sem APK, com manifest próprio, ícones de marca, registro de service worker e botão de instalação na tela inicial. Em navegadores com `beforeinstallprompt`, o botão abre o fluxo nativo; em iPhone, ele apresenta o caminho manual de Safari/Compartilhar/Adicionar à Tela de Início. O cache offline fica restrito ao shell e assets; `/api/` e `/media/` não serão armazenados.

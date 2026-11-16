@@ -9,6 +9,8 @@ const SEARCH_DEBOUNCE_MS = 600;
 type Screen = 'catalog' | 'detail';
 type PlayerState = { season: number; episode: number } | null;
 type FlatEpisode = Episode & { seasonNumber: number; seasonTitle: string };
+type DramaWatchProgress = { seasonNumber: number; episodeNumber: number; positionSeconds: number; watchedEpisodes: string[] };
+type WatchProgressMap = Record<string, DramaWatchProgress>;
 type InstallPlatform = 'ios' | 'android' | 'other';
 
 interface BeforeInstallPromptEvent extends Event {
@@ -111,6 +113,11 @@ function compactNumber(value?: number) {
 }
 
 const MY_LIST_STORAGE_KEY = 'drama-reels-minha-lista';
+const WATCH_PROGRESS_STORAGE_KEY = 'drama-reels-watch-progress-v1';
+
+function episodeProgressKey(seasonNumber: number, episodeNumber: number) {
+  return `${seasonNumber}:${episodeNumber}`;
+}
 
 function readMyList(): Drama[] {
   try {
@@ -121,10 +128,36 @@ function readMyList(): Drama[] {
   }
 }
 
+function readWatchProgress(): WatchProgressMap {
+  try {
+    const stored = window.localStorage.getItem(WATCH_PROGRESS_STORAGE_KEY);
+    if (!stored) return {};
+    const parsed: unknown = JSON.parse(stored);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const progress: WatchProgressMap = {};
+    Object.entries(parsed).forEach(([dramaId, value]) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+      const entry = value as Partial<DramaWatchProgress>;
+      const seasonNumber = Number(entry.seasonNumber);
+      const episodeNumber = Number(entry.episodeNumber);
+      const positionSeconds = Number(entry.positionSeconds);
+      if (!Number.isFinite(seasonNumber) || seasonNumber < 0 || !Number.isFinite(episodeNumber) || episodeNumber < 1) return;
+      const watchedEpisodes = Array.isArray(entry.watchedEpisodes)
+        ? [...new Set(entry.watchedEpisodes.filter((key): key is string => typeof key === 'string' && /^\d+:\d+$/.test(key)))].slice(-500)
+        : [];
+      progress[dramaId] = { seasonNumber, episodeNumber, positionSeconds: Number.isFinite(positionSeconds) && positionSeconds > 0 ? positionSeconds : 0, watchedEpisodes };
+    });
+    return progress;
+  } catch {
+    return {};
+  }
+}
+
 export default function App() {
   const [screen, setScreen] = useState<Screen>('catalog');
   const [dramas, setDramas] = useState<Drama[]>([]);
   const [myList, setMyList] = useState<Drama[]>(readMyList);
+  const [watchProgress, setWatchProgress] = useState<WatchProgressMap>(readWatchProgress);
   const [categories, setCategories] = useState<Category[]>([]);
   const [activeTab, setActiveTab] = useState('todos');
   const [selectedDrama, setSelectedDrama] = useState<Drama | null>(null);
@@ -153,6 +186,14 @@ export default function App() {
   const pageRef = useRef(1);
   const tabRef = useRef('todos');
   const queryRef = useRef('');
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(WATCH_PROGRESS_STORAGE_KEY, JSON.stringify(watchProgress));
+    } catch {
+      // A reprodução permanece disponível mesmo se o armazenamento estiver cheio ou desativado.
+    }
+  }, [watchProgress]);
 
   useEffect(() => {
     setInstallPlatform(detectInstallPlatform());
@@ -331,9 +372,44 @@ export default function App() {
     });
   }, []);
 
-  const handlePlayerStarted = useCallback(() => {
-    if (selectedDrama) rememberDrama(selectedDrama);
-  }, [rememberDrama, selectedDrama]);
+  const recordWatchProgress = useCallback((dramaId: string, episode: FlatEpisode, completed = false, positionSeconds?: number) => {
+    const key = episodeProgressKey(episode.seasonNumber, episode.numero);
+    setWatchProgress((current) => {
+      const previous = current[dramaId];
+      const sameEpisode = previous?.seasonNumber === episode.seasonNumber && previous.episodeNumber === episode.numero;
+      const watchedEpisodes = completed
+        ? [...new Set([...(previous?.watchedEpisodes ?? []), key])].slice(-500)
+        : previous?.watchedEpisodes ?? [];
+      const savedPosition = completed
+        ? 0
+        : typeof positionSeconds === 'number' && Number.isFinite(positionSeconds)
+          ? Math.max(0, positionSeconds)
+          : sameEpisode ? previous?.positionSeconds ?? 0 : 0;
+      return {
+        ...current,
+        [dramaId]: {
+          seasonNumber: episode.seasonNumber,
+          episodeNumber: episode.numero,
+          positionSeconds: savedPosition,
+          watchedEpisodes,
+        },
+      };
+    });
+  }, []);
+
+  const handlePlayerStarted = useCallback((episode: FlatEpisode) => {
+    if (!selectedDrama) return;
+    rememberDrama(selectedDrama);
+    recordWatchProgress(selectedDrama._id, episode);
+  }, [recordWatchProgress, rememberDrama, selectedDrama]);
+
+  const handleEpisodeCompleted = useCallback((episode: FlatEpisode) => {
+    if (selectedDrama) recordWatchProgress(selectedDrama._id, episode, true);
+  }, [recordWatchProgress, selectedDrama]);
+
+  const handlePlayerPositionChanged = useCallback((episode: FlatEpisode, positionSeconds: number) => {
+    if (selectedDrama) recordWatchProgress(selectedDrama._id, episode, false, positionSeconds);
+  }, [recordWatchProgress, selectedDrama]);
 
   const visibleDramas = activeTab === 'mylist' ? myList : dramas;
   const loadedCount = visibleDramas.length;
@@ -445,13 +521,14 @@ export default function App() {
           drama={selectedDrama}
           loading={detailLoading}
           error={detailError}
+          progress={selectedDrama ? watchProgress[selectedDrama._id] ?? null : null}
           onBack={closeDetail}
           onOpenEpisode={openEpisode}
         />
       )}
 
       {player && selectedDrama && (
-        <PlayerModal drama={selectedDrama} initial={player} onClose={() => setPlayer(null)} onStarted={handlePlayerStarted} />
+        <PlayerModal drama={selectedDrama} initial={player} progress={watchProgress[selectedDrama._id] ?? null} onClose={() => setPlayer(null)} onStarted={handlePlayerStarted} onEpisodeCompleted={handleEpisodeCompleted} onPositionChanged={handlePlayerPositionChanged} />
       )}
       {installHelpOpen && <InstallHelpModal platform={installPlatform} onClose={() => setInstallHelpOpen(false)} />}
     </div>
@@ -480,8 +557,15 @@ function DramaCard({ drama, index, onOpen }: { drama: Drama; index: number; onOp
   );
 }
 
-function DetailView({ drama, loading, error, onBack, onOpenEpisode }: { drama: Drama | null; loading: boolean; error: string; onBack: () => void; onOpenEpisode: (episode: FlatEpisode) => void }) {
+function DetailView({ drama, loading, error, progress, onBack, onOpenEpisode }: { drama: Drama | null; loading: boolean; error: string; progress: DramaWatchProgress | null; onBack: () => void; onOpenEpisode: (episode: FlatEpisode) => void }) {
   const episodes = useMemo(() => flattenEpisodes(drama), [drama]);
+  const savedEpisode = progress ? episodes.find((episode) => episode.seasonNumber === progress.seasonNumber && episode.numero === progress.episodeNumber) : undefined;
+  const savedEpisodeCompleted = savedEpisode ? progress?.watchedEpisodes.includes(episodeProgressKey(savedEpisode.seasonNumber, savedEpisode.numero)) ?? false : false;
+  const primaryEpisode = savedEpisode?.urlVideo ? savedEpisode : episodes.find((episode) => episode.urlVideo);
+  const isResuming = Boolean(primaryEpisode && savedEpisode === primaryEpisode && !savedEpisodeCompleted);
+  const isReplaying = Boolean(primaryEpisode && savedEpisode === primaryEpisode && savedEpisodeCompleted);
+  const primaryActionLabel = !primaryEpisode ? 'episódio em breve' : isResuming ? '▶ continuar assistindo' : isReplaying ? '▶ assistir novamente' : '▶ assistir agora';
+  const primaryActionHint = isResuming ? `retomar temporada ${primaryEpisode?.seasonNumber} · episódio ${primaryEpisode?.numero}` : isReplaying ? 'último episódio concluído' : primaryEpisode ? 'Escolha uma história e aproveite.' : error || 'Novos episódios podem aparecer em breve.';
   if (!drama && loading) return <main className="detail-page"><div className="detail-loading"><span className="spinner" /> abrindo a história…</div></main>;
   if (!drama) return <main className="detail-page"><ErrorPanel message={error || 'Dorama não encontrado.'} onRetry={onBack} /></main>;
 
@@ -495,7 +579,7 @@ function DetailView({ drama, loading, error, onBack, onOpenEpisode }: { drama: D
           <h1>{drama.titulo}</h1>
           <div className="detail-meta"><span>{drama.totalEpisodios || episodes.length} episódios</span><span>{drama.anoLancamento || '2026'}</span><span>{drama.idiomaTagManual || 'Dublado'}</span></div>
           <p className="detail-synopsis">{drama.sinopse || 'Uma história para assistir no seu ritmo, episódio após episódio.'}</p>
-          <div className="detail-actions"><button className="primary-button" type="button" disabled={!episodes[0]?.urlVideo} onClick={() => episodes[0]?.urlVideo && onOpenEpisode(episodes[0])}>{episodes[0]?.urlVideo ? '▶ assistir agora' : 'episódio em breve'}</button><span className="swipe-hint">{episodes[0]?.urlVideo ? 'Escolha uma história e aproveite.' : error || 'Novos episódios podem aparecer em breve.'}</span></div>
+          <div className="detail-actions"><button className="primary-button" type="button" disabled={!primaryEpisode} onClick={() => primaryEpisode && onOpenEpisode(primaryEpisode)}>{primaryActionLabel}</button><span className="swipe-hint">{primaryActionHint}</span></div>
         </div>
       </section>
 
@@ -506,10 +590,17 @@ function DetailView({ drama, loading, error, onBack, onOpenEpisode }: { drama: D
         {drama.temporadas?.map((season: Season) => (
           <div className="season-block" key={season.numero}>
             <div className="season-heading"><span>{String(season.numero).padStart(2, '0')}</span><h3>{season.titulo}</h3></div>
-            <div className="episode-grid">{season.episodios.map((episode) => <button className="episode-card" type="button" disabled={!episode.urlVideo} key={`${season.numero}-${episode.numero}`} onClick={() => episode.urlVideo && onOpenEpisode({ ...episode, seasonNumber: season.numero, seasonTitle: season.titulo })}>
-              <span className="episode-thumb">{episode.thumbnail ? <img src={episode.thumbnail} alt="" onError={recoverCover} /> : <span>{String(episode.numero).padStart(2, '0')}</span>}<i>{episode.urlVideo ? '▶' : '—'}</i></span>
-              <span className="episode-text"><strong>Episódio {episode.numero}</strong><small>{formatDuration(episode.duracaoSegundos) || (episode.urlVideo ? 'assistir agora' : 'em breve')}</small></span>
-            </button>)}</div>
+            <div className="episode-grid">{season.episodios.map((episode) => {
+              const progressKey = episodeProgressKey(season.numero, episode.numero);
+              const isWatched = progress?.watchedEpisodes.includes(progressKey) ?? false;
+              const isCurrent = progress?.seasonNumber === season.numero && progress.episodeNumber === episode.numero && !isWatched;
+              const episodeClass = `episode-card${isWatched ? ' is-watched' : ''}${isCurrent ? ' is-resume' : ''}`;
+              return <button className={episodeClass} type="button" disabled={!episode.urlVideo} key={`${season.numero}-${episode.numero}`} onClick={() => episode.urlVideo && onOpenEpisode({ ...episode, seasonNumber: season.numero, seasonTitle: season.titulo })} aria-label={`Temporada ${season.numero}, episódio ${episode.numero}${isWatched ? ', assistido' : isCurrent ? ', continuar assistindo' : ''}`}>
+                <span className="episode-thumb">{episode.thumbnail ? <img src={episode.thumbnail} alt="" onError={recoverCover} /> : <span>{String(episode.numero).padStart(2, '0')}</span>}<i>{episode.urlVideo ? '▶' : '—'}</i></span>
+                <span className="episode-text"><strong>Episódio {episode.numero}</strong><small>{isCurrent ? 'continuar assistindo' : isWatched ? 'assistido' : formatDuration(episode.duracaoSegundos) || (episode.urlVideo ? 'assistir agora' : 'em breve')}</small></span>
+                {(isWatched || isCurrent) && <span className="episode-status">{isWatched ? '✓ assistido' : 'retomar'}</span>}
+              </button>;
+            })}</div>
           </div>
         ))}
       </section>
@@ -517,9 +608,14 @@ function DetailView({ drama, loading, error, onBack, onOpenEpisode }: { drama: D
   );
 }
 
-function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; initial: { season: number; episode: number }; onClose: () => void; onStarted: () => void }) {
+function PlayerModal({ drama, initial, progress, onClose, onStarted, onEpisodeCompleted, onPositionChanged }: { drama: Drama; initial: { season: number; episode: number }; progress: DramaWatchProgress | null; onClose: () => void; onStarted: (episode: FlatEpisode) => void; onEpisodeCompleted: (episode: FlatEpisode) => void; onPositionChanged: (episode: FlatEpisode, positionSeconds: number) => void }) {
   const episodes = useMemo(() => flattenEpisodes(drama), [drama]);
   const initialIndex = Math.max(0, episodes.findIndex((episode) => episode.seasonNumber === initial.season && episode.numero === initial.episode));
+  const initialEpisode = episodes[initialIndex];
+  const initialResumeSeconds = initialEpisode && progress?.seasonNumber === initialEpisode.seasonNumber && progress.episodeNumber === initialEpisode.numero && !progress.watchedEpisodes.includes(episodeProgressKey(initialEpisode.seasonNumber, initialEpisode.numero))
+    ? progress.positionSeconds
+    : 0;
+  const initialResumeSecondsRef = useRef(initialResumeSeconds);
   const [activeIndex, setActiveIndex] = useState(initialIndex);
   const [videoUrl, setVideoUrl] = useState('');
   const [currentTime, setCurrentTime] = useState(0);
@@ -532,11 +628,17 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
   const [pipActive, setPipActive] = useState(false);
   const [pipNotice, setPipNotice] = useState('');
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const resumePositionRef = useRef(0);
+  const latestPositionRef = useRef(0);
+  const lastSavedPositionRef = useRef(-1);
   const current = episodes[activeIndex];
 
-  const loadEpisode = useCallback(async (index: number) => {
+  const loadEpisode = useCallback(async (index: number, resumeSeconds = 0) => {
     const episode = episodes[index];
     if (!episode) return;
+    resumePositionRef.current = Math.max(0, resumeSeconds);
+    latestPositionRef.current = resumePositionRef.current;
+    lastSavedPositionRef.current = resumePositionRef.current;
     setActiveIndex(index);
     setVideoUrl('');
     setCurrentTime(0);
@@ -546,13 +648,57 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
     try {
       if (!episode.urlVideo) throw new Error('Este episódio não possui um vídeo disponível.');
       setVideoUrl(episode.urlVideo);
-      onStarted();
+      onStarted(episode);
     } catch (requestError) {
         setError('Não foi possível carregar este episódio. Tente novamente ou escolha outro.');
     }
   }, [episodes, onStarted]);
 
-  useEffect(() => { void loadEpisode(initialIndex); }, [initialIndex, loadEpisode]);
+  useEffect(() => { void loadEpisode(initialIndex, initialResumeSecondsRef.current); }, [initialIndex, loadEpisode]);
+
+  const persistPlaybackPosition = useCallback((episode: FlatEpisode, seconds: number, force = false) => {
+    const position = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+    latestPositionRef.current = position;
+    if (force || Math.abs(position - lastSavedPositionRef.current) >= 3) {
+      lastSavedPositionRef.current = position;
+      onPositionChanged(episode, position);
+    }
+  }, [onPositionChanged]);
+
+  const saveCurrentPosition = useCallback(() => {
+    if (!current) return;
+    const videoTime = videoRef.current?.currentTime;
+    const position = typeof videoTime === 'number' && Number.isFinite(videoTime) ? videoTime : latestPositionRef.current;
+    persistPlaybackPosition(current, position, true);
+  }, [current, persistPlaybackPosition]);
+
+  const restoreSavedPosition = useCallback((video: HTMLVideoElement) => {
+    const pending = resumePositionRef.current;
+    if (pending <= 0) return;
+    const mediaDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : duration;
+    const target = mediaDuration > 0 ? Math.min(pending, Math.max(0, mediaDuration - 0.25)) : pending;
+    try {
+      video.currentTime = target;
+      setCurrentTime(target);
+      latestPositionRef.current = target;
+      lastSavedPositionRef.current = target;
+      if (Math.abs(video.currentTime - target) < 1 || video.seekable.length === 0) resumePositionRef.current = 0;
+    } catch {
+      // Algumas fontes HLS só aceitam o seek quando o primeiro trecho fica disponível.
+    }
+  }, [duration]);
+
+  useEffect(() => {
+    const persistWhenHidden = () => {
+      if (document.visibilityState === 'hidden') saveCurrentPosition();
+    };
+    document.addEventListener('visibilitychange', persistWhenHidden);
+    window.addEventListener('pagehide', saveCurrentPosition);
+    return () => {
+      document.removeEventListener('visibilitychange', persistWhenHidden);
+      window.removeEventListener('pagehide', saveCurrentPosition);
+    };
+  }, [saveCurrentPosition]);
 
   useEffect(() => {
     if (!videoUrl || !videoRef.current) return;
@@ -616,13 +762,13 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
 
   useEffect(() => {
     const keyHandler = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape') { saveCurrentPosition(); onClose(); }
       if (event.key === 'ArrowDown') void loadEpisode(Math.min(episodes.length - 1, activeIndex + 1));
       if (event.key === 'ArrowUp') void loadEpisode(Math.max(0, activeIndex - 1));
     };
     window.addEventListener('keydown', keyHandler);
     return () => window.removeEventListener('keydown', keyHandler);
-  }, [activeIndex, episodes.length, loadEpisode, onClose]);
+  }, [activeIndex, episodes.length, loadEpisode, onClose, saveCurrentPosition]);
 
   const moveEpisode = (direction: 1 | -1) => void loadEpisode(Math.max(0, Math.min(episodes.length - 1, activeIndex + direction)));
   const handleTouchEnd = (clientY: number) => {
@@ -645,6 +791,7 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
     const nextTime = Math.max(0, Math.min(mediaDuration, requestedTime));
     video.currentTime = nextTime;
     setCurrentTime(nextTime);
+    if (current) persistPlaybackPosition(current, nextTime, true);
   };
 
   const togglePictureInPicture = async () => {
@@ -683,10 +830,10 @@ function PlayerModal({ drama, initial, onClose, onStarted }: { drama: Drama; ini
           <input type="range" min={0} max={duration || 0} step={0.25} value={Math.min(currentTime, duration || currentTime)} style={{ '--seek-progress': `${duration ? currentTime / duration * 100 : 0}%` } as React.CSSProperties} disabled={!duration} aria-label="Posição no episódio" aria-valuetext={`${formatTime(currentTime)} de ${formatTime(duration)}`} onInput={handleSeek} onChange={handleSeek} />
           <span className="player-time">{formatTime(currentTime)} / {formatTime(duration)}</span>
         </div>
-        {videoUrl ? <video ref={videoRef} key={videoUrl} className="player-video" autoPlay playsInline muted={muted} onLoadedMetadata={(event) => { const next = durationFromVideo(event.currentTarget); if (next > 0) setDuration(next); }} onDurationChange={(event) => { const next = durationFromVideo(event.currentTarget); if (next > 0) setDuration(next); }} onTimeUpdate={(event) => { const video = event.currentTarget; setCurrentTime(video.currentTime || 0); const next = durationFromVideo(video); if (next > 0) setDuration(next); }} onPlay={() => setPaused(false)} onPause={() => setPaused(false)} onEnded={() => { if (activeIndex < episodes.length - 1) moveEpisode(1); }} onError={() => setError('Não foi possível reproduzir este episódio. Tente novamente ou escolha outro.')} /> : <div className="player-loading"><span className="spinner" /><p>preparando episódio {current?.numero || ''}</p></div>}
+        {videoUrl ? <video ref={videoRef} key={videoUrl} className="player-video" autoPlay playsInline muted={muted} onLoadedMetadata={(event) => { const video = event.currentTarget; const next = durationFromVideo(video); if (next > 0) setDuration(next); restoreSavedPosition(video); }} onDurationChange={(event) => { const video = event.currentTarget; const next = durationFromVideo(video); if (next > 0) setDuration(next); restoreSavedPosition(video); }} onCanPlay={(event) => restoreSavedPosition(event.currentTarget)} onTimeUpdate={(event) => { const video = event.currentTarget; restoreSavedPosition(video); setCurrentTime(video.currentTime || 0); const next = durationFromVideo(video); if (next > 0) setDuration(next); if (current) persistPlaybackPosition(current, video.currentTime || 0); }} onPlay={() => setPaused(false)} onPause={() => setPaused(false)} onEnded={() => { if (current) onEpisodeCompleted(current); if (activeIndex < episodes.length - 1) moveEpisode(1); }} onError={() => setError('Não foi possível reproduzir este episódio. Tente novamente ou escolha outro.')} /> : <div className="player-loading"><span className="spinner" /><p>preparando episódio {current?.numero || ''}</p></div>}
         <div className="player-vignette" />
         {controlsVisible && <>
-          <button className="player-close" onClick={(event) => { event.stopPropagation(); onClose(); }}>× <span>fechar</span></button>
+          <button className="player-close" onClick={(event) => { event.stopPropagation(); saveCurrentPosition(); onClose(); }}>× <span>fechar</span></button>
           <div className="player-copy"><p className="eyebrow">{current?.seasonTitle || 'EPISÓDIO'}</p><h2>{drama.titulo}</h2><p>Episódio {current?.numero || '—'} <span>·</span> deslize para continuar</p></div>
           <div className="player-controls" onClick={(event) => event.stopPropagation()}><button onClick={() => moveEpisode(-1)} disabled={activeIndex === 0} aria-label="Episódio anterior">↑</button><button className="play-button" onClick={togglePlay} aria-label={paused ? 'Reproduzir' : 'Pausar'}>{paused ? '▶' : 'Ⅱ'}</button><button onClick={() => moveEpisode(1)} disabled={activeIndex === episodes.length - 1} aria-label="Próximo episódio">↓</button><button onClick={() => setMuted((value) => !value)} aria-label={muted ? 'Ativar som' : 'Desativar som'}>{muted ? '⌁' : '◖'}</button><button className={pipActive ? 'pip-button active' : 'pip-button'} type="button" onClick={() => void togglePictureInPicture()} aria-label={pipActive ? 'Sair da janela flutuante' : 'Janela flutuante'} aria-pressed={pipActive} title="Janela flutuante"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><path d="M12.5 12.5h6v5h-6z" /></svg></button></div>
           {pipNotice && <div className="pip-notice" role="status" onClick={(event) => event.stopPropagation()}><span>{pipNotice}</span><button type="button" onClick={() => setPipNotice('')} aria-label="Fechar aviso">×</button></div>}

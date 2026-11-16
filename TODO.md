@@ -24,3 +24,9 @@
 
 - [x] O app deve poder ser instalado como web app (PWA), sem APK, em Android e iOS; a tela inicial deve ter um botão de instalação com visual alinhado à marca. O botão deve abrir o prompt nativo quando o navegador o oferecer e, no iPhone, orientar a instalação manual pela Tela de Início.
 - [x] Enquanto um episódio estiver tocando, o usuário deve poder ativar Picture-in-Picture para manter o vídeo em janela flutuante ao alternar para o WhatsApp, quando navegador e sistema oferecerem suporte; se não oferecerem, mostrar uma orientação clara sem encerrar o player.
+
+
+## Retomada e estado dos episódios
+
+- [x] Ao assistir um dorama, sair do player e retornar ao mesmo título, “Assistir agora” deve retomar a temporada, o episódio e o ponto exato mais recentemente selecionados, em vez de sempre começar pelo primeiro ou pelo início do episódio; se não houver progresso salvo ou o episódio salvo estiver indisponível, abrir o primeiro episódio reproduzível. Implementado com armazenamento local por ID do dorama, temporada/episódio e segundos assistidos; `pnpm check` e `pnpm build` passaram.
+- [x] Os cards de episódio devem indicar visualmente o episódio atual para continuar e os episódios concluídos como assistidos; as marcações devem permanecer ao sair do título ou recarregar o app. O player marca o episódio no evento de término e persiste as marcações no `localStorage`; validado por `pnpm check` e `pnpm build`.

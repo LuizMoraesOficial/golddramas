@@ -72,6 +72,15 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; }
 .player-progress { top: auto; bottom: 62px; }
 .player-progress .player-time { display: inline; height: auto; padding: 0; background: transparent; }
 
+/* Estados persistidos de reprodução nos cards dos episódios. */
+.episode-card.is-resume { border-color: rgba(255,85,173,.82); background: rgba(230,0,126,.12); box-shadow: inset 3px 0 0 var(--pink); }
+.episode-card.is-watched { border-color: rgba(119,211,165,.35); background: rgba(119,211,165,.045); }
+.episode-card.is-watched .episode-text small { color: #9bd9b7; }
+.episode-card.is-resume .episode-text small { color: var(--pink-soft); }
+.episode-status { flex: 0 0 auto; margin-left: auto; align-self: flex-start; padding: 5px 7px; border: 1px solid rgba(255,255,255,.14); color: var(--muted); font-size: 8px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; white-space: nowrap; }
+.episode-card.is-resume .episode-status { border-color: rgba(255,85,173,.45); color: var(--pink-soft); }
+.episode-card.is-watched .episode-status { border-color: rgba(119,211,165,.3); color: #9bd9b7; }
+
 
 /* Instalação PWA e Picture-in-Picture */
 .topbar-actions { display: flex; align-items: center; gap: 22px; }
